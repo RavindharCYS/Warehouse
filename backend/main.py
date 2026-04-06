@@ -25,7 +25,6 @@ def run_migrations():
         return table in insp.get_table_names()
 
     with engine.connect() as conn:
-        # Legacy column migrations
         if not col_exists("transactions", "sub_source"):
             conn.execute(text("ALTER TABLE transactions ADD COLUMN sub_source VARCHAR(200)"))
             print("[MIGRATE] transactions.sub_source added")
@@ -38,13 +37,11 @@ def run_migrations():
             conn.execute(text("ALTER TABLE stocks ADD COLUMN production_company_ta VARCHAR(200)"))
             print("[MIGRATE] stocks.production_company_ta added")
 
-        # Email OTP migration
         if not col_exists("users", "email"):
             conn.execute(text("ALTER TABLE users ADD COLUMN email VARCHAR(255)"))
             print("[MIGRATE] users.email added")
 
         if tbl_exists("otp_logs") and not col_exists("otp_logs", "email_used"):
-            # Add email_used column
             conn.execute(text("ALTER TABLE otp_logs ADD COLUMN email_used VARCHAR(255)"))
             print("[MIGRATE] otp_logs.email_used added")
 
@@ -63,10 +60,7 @@ def run_migrations():
         conn.commit()
 
 
-# Create all tables first (handles fresh installs)
 Base.metadata.create_all(bind=engine)
-
-# Then run migrations to add any new columns/tables to existing DBs
 run_migrations()
 
 
@@ -97,10 +91,12 @@ def seed_default_admin():
 
 seed_default_admin()
 
+# ✅ FIXED: Added redirect_slashes=False to prevent 307 redirects dropping auth headers
 app = FastAPI(
     title="Rice Warehouse Management API",
     description="Multi-warehouse rice stock management system with Tamil/English support",
-    version="3.0.0"
+    version="3.0.0",
+    redirect_slashes=False
 )
 
 app.add_middleware(
@@ -115,7 +111,7 @@ app.include_router(auth.router,         prefix="/api/auth",         tags=["Authe
 app.include_router(users.router,        prefix="/api/users",        tags=["Users"])
 app.include_router(warehouses.router,   prefix="/api/warehouses",   tags=["Warehouses"])
 app.include_router(stocks.router,       prefix="/api/stocks",       tags=["Stocks"])
-app.include_router(transactions.router, prefix="/api/transactions",  tags=["Transactions"])
+app.include_router(transactions.router, prefix="/api/transactions", tags=["Transactions"])
 app.include_router(dashboard.router,    prefix="/api/dashboard",    tags=["Dashboard"])
 
 @app.get("/")
