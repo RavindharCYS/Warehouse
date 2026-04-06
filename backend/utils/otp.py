@@ -5,6 +5,7 @@ import os
 import logging
 import smtplib
 import ssl
+import requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
@@ -16,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Email config via environment
 SMTP_HOST     = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT     = int(os.getenv("SMTP_PORT", "587"))
+SMTP_PORT     = int(os.getenv("SMTP_PORT", "465"))
 SMTP_USER     = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 EMAIL_FROM    = os.getenv("EMAIL_FROM", SMTP_USER)
@@ -27,7 +28,8 @@ OTP_EXPIRY_MINUTES = 10
 
 def send_otp_email(email: str, otp: str, full_name: str = "Admin") -> bool:
     """
-    Send OTP via SMTP email. Falls back to console log in dev mode.
+    Send OTP via SMTP email. Tries SSL (465) first, then TLS (587).
+    Falls back to console log in dev mode.
     """
     subject = "Rice Warehouse – Your Login OTP"
 
@@ -99,14 +101,31 @@ def send_otp_email(email: str, otp: str, full_name: str = "Admin") -> bool:
             msg.attach(MIMEText(html_body, "html"))
 
             context = ssl.create_default_context()
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-                server.ehlo()
-                server.starttls(context=context)
-                server.login(SMTP_USER, SMTP_PASSWORD)
-                server.sendmail(EMAIL_FROM, email, msg.as_string())
 
-            logger.info(f"OTP email sent to {email}")
-            return True
+            # Try SSL (port 465) first — works on Railway
+            try:
+                logger.info(f"Trying SMTP_SSL on port 465...")
+                with smtplib.SMTP_SSL(SMTP_HOST, 465, context=context, timeout=30) as server:
+                    server.login(SMTP_USER, SMTP_PASSWORD)
+                    server.sendmail(EMAIL_FROM, email, msg.as_string())
+                logger.info(f"OTP email sent via SSL to {email}")
+                return True
+            except Exception as e1:
+                logger.warning(f"SSL failed: {e1}, trying TLS on port 587...")
+
+            # Fallback to TLS (port 587) — works locally
+            try:
+                with smtplib.SMTP(SMTP_HOST, 587, timeout=30) as server:
+                    server.ehlo()
+                    server.starttls(context=context)
+                    server.login(SMTP_USER, SMTP_PASSWORD)
+                    server.sendmail(EMAIL_FROM, email, msg.as_string())
+                logger.info(f"OTP email sent via TLS to {email}")
+                return True
+            except Exception as e2:
+                logger.error(f"TLS also failed: {e2}")
+                return False
+
         except Exception as e:
             logger.error(f"Email send error: {e}")
             return False
