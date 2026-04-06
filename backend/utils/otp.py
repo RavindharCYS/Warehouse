@@ -5,7 +5,6 @@ import os
 import logging
 import smtplib
 import ssl
-import requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
