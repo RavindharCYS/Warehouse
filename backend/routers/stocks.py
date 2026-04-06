@@ -32,7 +32,8 @@ def _stock_with_inv(s: Stock, db: Session) -> StockWithInventory:
     )
 
 
-@router.get("/", response_model=List[StockWithInventory])
+# ✅ CHANGED: "/" to ""
+@router.get("", response_model=List[StockWithInventory])
 def list_stocks(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return [_stock_with_inv(s, db) for s in db.query(Stock).filter(Stock.is_active == True).all()]
 
@@ -45,7 +46,8 @@ def get_stock(stock_id: int, db: Session = Depends(get_db), current_user: User =
     return _stock_with_inv(s, db)
 
 
-@router.post("/", response_model=StockOut, status_code=status.HTTP_201_CREATED)
+# ✅ CHANGED: "/" to ""
+@router.post("", response_model=StockOut, status_code=status.HTTP_201_CREATED)
 def create_stock(payload: StockCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     stock = Stock(**payload.model_dump())
     db.add(stock)

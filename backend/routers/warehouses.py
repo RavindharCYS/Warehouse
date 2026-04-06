@@ -38,7 +38,8 @@ def _wh_with_stock(w: Warehouse, db: Session) -> WarehouseWithStock:
     )
 
 
-@router.get("/", response_model=List[WarehouseWithStock])
+# ✅ CHANGED: "/" to ""
+@router.get("", response_model=List[WarehouseWithStock])
 def list_warehouses(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return [_wh_with_stock(w, db) for w in db.query(Warehouse).filter(Warehouse.is_active == True).all()]
 
@@ -53,12 +54,10 @@ def get_warehouse(warehouse_id: int, db: Session = Depends(get_db), current_user
 
 @router.get("/{warehouse_id}/stocks")
 def get_warehouse_stocks(warehouse_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """Return per-stock breakdown inside a specific warehouse."""
     w = db.query(Warehouse).filter(Warehouse.id == warehouse_id).first()
     if not w:
         raise HTTPException(status_code=404, detail="Warehouse not found")
 
-    # Find every stock that has transactions in this warehouse
     stock_ids = db.query(Transaction.stock_id).filter(
         Transaction.warehouse_id == warehouse_id
     ).distinct().all()
@@ -90,12 +89,12 @@ def get_warehouse_stocks(warehouse_id: int, db: Session = Depends(get_db), curre
             "remaining_kg": remaining * stock.bag_weight_kg,
         })
 
-    # Sort by remaining bags descending
     result.sort(key=lambda x: x["remaining_bags"], reverse=True)
     return result
 
 
-@router.post("/", response_model=WarehouseOut, status_code=status.HTTP_201_CREATED)
+# ✅ CHANGED: "/" to ""
+@router.post("", response_model=WarehouseOut, status_code=status.HTTP_201_CREATED)
 def create_warehouse(payload: WarehouseCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     if db.query(Warehouse).filter(Warehouse.location_name == payload.location_name).first():
         raise HTTPException(status_code=400, detail="Warehouse name already exists")

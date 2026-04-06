@@ -17,7 +17,6 @@ def list_custom_grades(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Return all custom quality grades added by users."""
     return db.query(CustomQualityGrade).order_by(CustomQualityGrade.grade_name).all()
 
 
@@ -27,7 +26,6 @@ def add_custom_grade(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Save a new custom quality grade so it appears in future dropdowns."""
     name = payload.grade_name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Grade name cannot be empty")
@@ -41,7 +39,8 @@ def add_custom_grade(
     return grade
 
 
-@router.get("/", response_model=List[TransactionOut])
+# ✅ CHANGED: "/" to ""
+@router.get("", response_model=List[TransactionOut])
 def list_transactions(
     warehouse_id: Optional[int] = None,
     stock_id: Optional[int] = None,
@@ -131,7 +130,8 @@ def get_stock_ledger(
     )
 
 
-@router.post("/", response_model=TransactionOut, status_code=status.HTTP_201_CREATED)
+# ✅ CHANGED: "/" to ""
+@router.post("", response_model=TransactionOut, status_code=status.HTTP_201_CREATED)
 def create_transaction(
     payload: TransactionCreate,
     db: Session = Depends(get_db),
@@ -145,7 +145,6 @@ def create_transaction(
     if not warehouse:
         raise HTTPException(status_code=404, detail="Warehouse not found")
 
-    # Check sufficient stock for outbound
     if payload.transaction_type == TransactionType.outbound:
         total_in = db.query(func.sum(Transaction.quantity_bags)).filter(
             Transaction.stock_id == payload.stock_id,
@@ -185,7 +184,6 @@ def create_transaction(
     db.commit()
     db.refresh(transaction)
 
-    # Auto-save custom quality grade
     if payload.quality_grade.value == "other" and payload.quality_note:
         name = payload.quality_note.strip()
         if name and not db.query(CustomQualityGrade).filter(CustomQualityGrade.grade_name == name).first():

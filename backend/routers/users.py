@@ -10,7 +10,8 @@ from utils.deps import get_current_user, require_admin
 router = APIRouter()
 
 
-@router.get("/", response_model=List[UserOut])
+# ✅ CHANGED: "/" to ""
+@router.get("", response_model=List[UserOut])
 def list_users(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
@@ -30,7 +31,8 @@ def get_user(
     return user
 
 
-@router.post("/", response_model=UserOut, status_code=status.HTTP_201_CREATED)
+# ✅ CHANGED: "/" to ""
+@router.post("", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 def create_user(
     payload: UserCreate,
     db: Session = Depends(get_db),
@@ -78,7 +80,6 @@ def update_user(
     if payload.role is not None:
         user.role = payload.role
     if payload.email is not None:
-        # Check email uniqueness
         dup = db.query(User).filter(User.email == payload.email, User.id != user_id).first()
         if dup:
             raise HTTPException(status_code=400, detail="Email already registered")
