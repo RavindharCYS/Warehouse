@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.db
+*.db-journal
+.env
+
+# Node
+node_modules/
+build/
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+npm-debug.log*
+
+# Android
+android/
+ios/
+
+# OS
+.DS_Store
+Thumbs.db
