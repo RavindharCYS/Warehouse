@@ -8,7 +8,7 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./rice_warehouse.db")
 
-# This one line fixes Railway PostgreSQL
+# Railway PostgreSQL fix
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
