@@ -90,7 +90,8 @@ def send_via_resend(email: str, otp: str, full_name: str) -> bool:
                 "Content-Type": "application/json"
             },
             json={
-                "from": f"{EMAIL_FROM_NAME} <onboarding@resend.dev>",
+                # ✅ FIXED: Using verified domain instead of onboarding@resend.dev
+                "from": f"{EMAIL_FROM_NAME} <noreply@exploiteye.in>",
                 "to": [email],
                 "subject": "Rice Warehouse – Your Login OTP",
                 "html": get_otp_html(otp, full_name)
