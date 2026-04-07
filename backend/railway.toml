@@ -1,7 +1,4 @@
-[build]
-builder = "nixpacks"
-
 [deploy]
-startCommand = "uvicorn main:app --host 0.0.0.0"
+startCommand = "python main.py"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 5
