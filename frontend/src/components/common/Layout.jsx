@@ -1,4 +1,5 @@
-import React from "react";
+// components/common/Layout.jsx
+import React, { useState } from "react";
 import { Outlet, NavLink, useNavigate, useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import {
@@ -8,6 +9,7 @@ import {
 } from "lucide-react";
 import { useAuth } from "../../hooks/useAuth";
 import { useTheme } from "../../hooks/useTheme";
+import ConfirmDialog from "./ConfirmDialog";
 import toast from "react-hot-toast";
 
 function LogoIcon() {
@@ -37,6 +39,11 @@ export default function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
 
+  // Confirmation dialog states
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  const [showLangConfirm, setShowLangConfirm] = useState(false);
+  const [showThemeConfirm, setShowThemeConfirm] = useState(false);
+
   const navItems = [
     { to: "/",             icon: LayoutDashboard, label: t("nav.dashboard"),    end: true },
     { to: "/warehouses",   icon: Warehouse,       label: t("nav.warehouses") },
@@ -46,18 +53,67 @@ export default function Layout() {
     ...(isAdmin ? [{ to: "/users", icon: Users, label: t("nav.users") }] : []),
   ];
 
-  const handleLogout = () => {
+  // ── Logout ──
+  const handleLogoutClick = () => {
+    setShowLogoutConfirm(true);
+  };
+
+  const handleLogoutConfirm = () => {
+    setShowLogoutConfirm(false);
     logout();
     toast.success(i18n.language === "ta" ? "வெளியேறினீர்கள்" : "Logged out");
     navigate("/login");
   };
 
-  const toggleLang = () => {
+  // ── Language ──
+  const handleLangClick = () => {
+    setShowLangConfirm(true);
+  };
+
+  const handleLangConfirm = () => {
+    setShowLangConfirm(false);
     const next = i18n.language === "en" ? "ta" : "en";
     i18n.changeLanguage(next);
+    toast.success(next === "ta" ? "மொழி தமிழுக்கு மாற்றப்பட்டது" : "Language changed to English");
+  };
+
+  // ── Theme ──
+  const handleThemeClick = () => {
+    setShowThemeConfirm(true);
+  };
+
+  const handleThemeConfirm = () => {
+    setShowThemeConfirm(false);
+    toggle();
+    toast.success(
+      dark
+        ? (i18n.language === "ta" ? "ஒளி பயன்முறைக்கு மாற்றப்பட்டது" : "Switched to Light Mode")
+        : (i18n.language === "ta" ? "இருள் பயன்முறைக்கு மாற்றப்பட்டது" : "Switched to Dark Mode")
+    );
   };
 
   const currentNav = navItems.find(n => n.end ? location.pathname === n.to : location.pathname.startsWith(n.to));
+
+  // Helper text for confirmations
+  const nextLang = i18n.language === "en" ? "ta" : "en";
+  const langConfirmTitle = i18n.language === "ta" ? "மொழி மாற்றம்" : "Change Language";
+  const langConfirmMessage = i18n.language === "ta"
+    ? "மொழியை English-க்கு மாற்ற விரும்புகிறீர்களா?"
+    : "Do you want to switch the language to தமிழ் (Tamil)?";
+
+  const themeConfirmTitle = i18n.language === "ta" ? "தீம் மாற்றம்" : "Change Theme";
+  const themeConfirmMessage = dark
+    ? (i18n.language === "ta"
+        ? "ஒளி பயன்முறைக்கு மாற்ற விரும்புகிறீர்களா?"
+        : "Do you want to switch to Light Mode?")
+    : (i18n.language === "ta"
+        ? "இருள் பயன்முறைக்கு மாற்ற விரும்புகிறீர்களா?"
+        : "Do you want to switch to Dark Mode?");
+
+  const logoutConfirmTitle = i18n.language === "ta" ? "வெளியேறு" : "Logout";
+  const logoutConfirmMessage = i18n.language === "ta"
+    ? "நீங்கள் வெளியேற விரும்புகிறீர்களா? மீண்டும் உள்நுழைய வேண்டும்."
+    : "Are you sure you want to logout? You will need to sign in again.";
 
   return (
     <div className="flex h-screen overflow-hidden" style={{ backgroundColor: "var(--bg-primary)" }}>
@@ -96,17 +152,17 @@ export default function Layout() {
 
           {/* Bottom controls */}
           <div className="px-3 py-3 border-t space-y-0.5" style={{ borderColor: "var(--border)" }}>
-            <button onClick={toggleLang} className="sidebar-link w-full">
+            <button onClick={handleLangClick} className="sidebar-link w-full">
               <Globe size={18} />
               <span className="flex-1">
                 {i18n.language === "en" ? "தமிழ் / Tamil" : "English"}
               </span>
             </button>
-            <button onClick={toggle} className="sidebar-link w-full">
+            <button onClick={handleThemeClick} className="sidebar-link w-full">
               {dark ? <Sun size={18} /> : <Moon size={18} />}
               <span className="flex-1">{dark ? t("common.lightMode") : t("common.darkMode")}</span>
             </button>
-            <button onClick={handleLogout} className="sidebar-link w-full" style={{ color: "var(--danger)" }}>
+            <button onClick={handleLogoutClick} className="sidebar-link w-full" style={{ color: "var(--danger)" }}>
               <LogOut size={18} />
               <span className="flex-1">{t("nav.logout")}</span>
             </button>
@@ -153,28 +209,28 @@ export default function Layout() {
 
           {/* Quick Actions */}
           <div className="flex items-center gap-2 shrink-0">
-            <button onClick={toggleLang}
+            <button onClick={handleLangClick}
               className="px-3 py-1.5 rounded-xl text-xs font-bold border"
               style={{ color: "var(--accent)", borderColor: "var(--accent)", backgroundColor: "var(--accent-soft)" }}>
               {i18n.language === "en" ? "த" : "EN"}
             </button>
-            <button onClick={toggle} className="p-2 rounded-xl"
+            <button onClick={handleThemeClick} className="p-2 rounded-xl"
               style={{ color: "var(--text-muted)", backgroundColor: "var(--bg-secondary)" }}>
               {dark ? <Sun size={17} /> : <Moon size={17} />}
             </button>
-            <button onClick={handleLogout} className="p-2 rounded-xl"
+            <button onClick={handleLogoutClick} className="p-2 rounded-xl"
               style={{ color: "var(--danger)", backgroundColor: "var(--bg-secondary)" }}>
               <LogOut size={17} />
             </button>
           </div>
         </header>
 
-        {/* ── Page Content (with bottom padding for mobile nav) ── */}
+        {/* ── Page Content ── */}
         <main className="flex-1 overflow-y-auto p-4 md:p-6 pb-20 md:pb-6 animate-fade-in">
           <Outlet />
         </main>
 
-        {/* ── Mobile Bottom Nav (Fixed) ─────────────── */}
+        {/* ── Mobile Bottom Nav ── */}
         <nav
           className="md:hidden flex"
           style={{
@@ -210,6 +266,44 @@ export default function Layout() {
           ))}
         </nav>
       </div>
+
+      {/* ── Confirmation Dialogs ── */}
+
+      {/* Language Change */}
+      <ConfirmDialog
+        open={showLangConfirm}
+        onClose={() => setShowLangConfirm(false)}
+        onConfirm={handleLangConfirm}
+        title={langConfirmTitle}
+        message={langConfirmMessage}
+        danger={false}
+        confirmLabel={nextLang === "ta" ? "தமிழ்" : "English"}
+      />
+
+      {/* Theme Change */}
+      <ConfirmDialog
+        open={showThemeConfirm}
+        onClose={() => setShowThemeConfirm(false)}
+        onConfirm={handleThemeConfirm}
+        title={themeConfirmTitle}
+        message={themeConfirmMessage}
+        danger={false}
+        confirmLabel={
+          dark
+            ? (i18n.language === "ta" ? "ஒளி பயன்முறை" : "Light Mode")
+            : (i18n.language === "ta" ? "இருள் பயன்முறை" : "Dark Mode")
+        }
+      />
+
+      {/* Logout */}
+      <ConfirmDialog
+        open={showLogoutConfirm}
+        onClose={() => setShowLogoutConfirm(false)}
+        onConfirm={handleLogoutConfirm}
+        title={logoutConfirmTitle}
+        message={logoutConfirmMessage}
+        danger={true}
+      />
     </div>
   );
 }
