@@ -232,13 +232,24 @@ app = FastAPI(
 )
 
 # ---- CORS (registered BEFORE routers) ----
-_raw_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
+_raw_origins = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:3000,http://127.0.0.1:3000"
+)
 _allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+
+# Also allow any subdomain of exploiteye.in and all vercel preview URLs
+_CORS_REGEX = (
+    r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
+    r"|https://.*\.vercel\.app"
+    r"|https://.*\.exploiteye\.in"
+    r"|https://exploiteye\.in"
+)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
-    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_origin_regex=_CORS_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -259,7 +270,12 @@ async def catch_all_exception_handler(request: Request, exc: Exception):
 
     origin = request.headers.get("origin", "")
     headers: dict = {}
-    if origin and (origin in _allowed_origins or origin.endswith(".vercel.app")):
+    if origin and (
+        origin in _allowed_origins
+        or origin.endswith(".vercel.app")
+        or origin.endswith(".exploiteye.in")
+        or origin == "https://exploiteye.in"
+    ):
         headers["Access-Control-Allow-Origin"] = origin
         headers["Access-Control-Allow-Credentials"] = "true"
         headers["Vary"] = "Origin"
