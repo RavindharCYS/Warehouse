@@ -1,7 +1,17 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from "react";
 import { authApi } from "../utils/api";
 
 const AuthContext = createContext(null);
+
+/**
+ * Field-level visibility rules.
+ * Used by Arrival/Send/Stocks/Reports pages to hide admin-only fields from regular users.
+ */
+export const ADMIN_ONLY_FIELDS = {
+  arrival: ["mill_owner_name", "price", "rent", "hidden_charges"],
+  send:    ["location", "sell_price"],
+  stocks:  ["price", "rent", "hidden_charges", "mill_owner_name", "sell_price"],
+};
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(() => {
@@ -13,8 +23,16 @@ export function AuthProvider({ children }) {
     const token = localStorage.getItem("auth_token");
     if (token) {
       authApi.me()
-        .then(res => setUser(res.data))
-        .catch(() => { localStorage.removeItem("auth_token"); localStorage.removeItem("auth_user"); setUser(null); })
+        .then(res => {
+          setUser(res.data);
+          // refresh cached user (role may have changed server-side)
+          localStorage.setItem("auth_user", JSON.stringify(res.data));
+        })
+        .catch(() => {
+          localStorage.removeItem("auth_token");
+          localStorage.removeItem("auth_user");
+          setUser(null);
+        })
         .finally(() => setLoading(false));
     } else {
       setLoading(false);
@@ -34,9 +52,52 @@ export function AuthProvider({ children }) {
   }, []);
 
   const isAdmin = user?.role === "admin";
+  const isUser  = user?.role === "user";
+
+  /**
+   * Returns true if the current user can see the given field on the given page.
+   *   canSeeField("arrival", "price")  -> false for normal users, true for admin
+   */
+  const canSeeField = useCallback((page, fieldName) => {
+    if (isAdmin) return true;
+    const hidden = ADMIN_ONLY_FIELDS[page] || [];
+    return !hidden.includes(fieldName);
+  }, [isAdmin]);
+
+  /**
+   * Returns true if the current user can edit the given field.
+   * Admin-only fields are read-only / hidden for users.
+   */
+  const canEditField = useCallback((page, fieldName) => {
+    return canSeeField(page, fieldName);
+  }, [canSeeField]);
+
+  /**
+   * Strip admin-only fields from a payload before submitting (extra safety for users).
+   */
+  const sanitizePayload = useCallback((page, payload) => {
+    if (isAdmin) return payload;
+    const hidden = ADMIN_ONLY_FIELDS[page] || [];
+    const clean = { ...payload };
+    hidden.forEach(f => { delete clean[f]; });
+    return clean;
+  }, [isAdmin]);
+
+  const value = useMemo(() => ({
+    user,
+    login,
+    logout,
+    isAdmin,
+    isUser,
+    loading,
+    canSeeField,
+    canEditField,
+    sanitizePayload,
+    ADMIN_ONLY_FIELDS,
+  }), [user, login, logout, isAdmin, isUser, loading, canSeeField, canEditField, sanitizePayload]);
 
   return (
-    <AuthContext.Provider value={{ user, login, logout, isAdmin, loading }}>
+    <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
   );

@@ -4,26 +4,16 @@ const config: CapacitorConfig = {
   appId: 'com.ricewarehouse.app',
   appName: 'Rice Warehouse',
   webDir: 'build',
-  server: {
-    androidScheme: 'https',
-    // For production, use your deployed URL:
-    // url: 'https://your-railway-app.up.railway.app'
+  android: {
+    allowMixedContent: true,
   },
   plugins: {
     SplashScreen: {
       launchShowDuration: 2000,
-      backgroundColor: '#d4891a',
-      androidSplashResourceName: 'splash',
+      backgroundColor: '#f0eeff',
       showSpinner: false,
+      androidScaleType: 'CENTER_CROP',
     },
-    StatusBar: {
-      style: 'LIGHT',
-      backgroundColor: '#d4891a',
-    },
-  },
-  android: {
-    allowMixedContent: true,
-    minWebViewVersion: 60,
   },
 };
 

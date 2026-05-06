@@ -20,7 +20,14 @@ import {
   Container,
   Database,
   LayoutGrid,
+  Info,
+  Truck,
+  User,
+  Calendar,
+  Scale,
+  ChevronRight,
 } from "lucide-react";
+import { format, parseISO } from "date-fns";
 import toast from "react-hot-toast";
 import { warehouseApi, getErrorMessage } from "../utils/api";
 import { useAuth } from "../hooks/useAuth";
@@ -31,32 +38,15 @@ import { transliterateToTamil } from "../utils/transliterate";
 
 // ── Icon & color cycles ──
 const WAREHOUSE_ICONS = [
-  Warehouse,
-  Building2,
-  Store,
-  Factory,
-  Layers,
-  Box,
-  Archive,
-  Container,
-  Database,
-  LayoutGrid,
+  Warehouse, Building2, Store, Factory, Layers,
+  Box, Archive, Container, Database, LayoutGrid,
 ];
 const WAREHOUSE_COLORS = [
-  "#e4a230",
-  "#10b981",
-  "#3b82f6",
-  "#8b5cf6",
-  "#ef4444",
-  "#f59e0b",
-  "#06b6d4",
-  "#ec4899",
-  "#84cc16",
-  "#f97316",
+  "#e4a230", "#10b981", "#3b82f6", "#8b5cf6", "#ef4444",
+  "#f59e0b", "#06b6d4", "#ec4899", "#84cc16", "#f97316",
 ];
 const getWarehouseIcon = (idx) => WAREHOUSE_ICONS[idx % WAREHOUSE_ICONS.length];
-const getWarehouseColor = (idx) =>
-  WAREHOUSE_COLORS[idx % WAREHOUSE_COLORS.length];
+const getWarehouseColor = (idx) => WAREHOUSE_COLORS[idx % WAREHOUSE_COLORS.length];
 
 // ── Helper: measure bottom nav height ──
 function measureBottomNav() {
@@ -73,7 +63,6 @@ function measureBottomNav() {
   ];
 
   let navHeight = 0;
-
   for (const sel of selectors) {
     try {
       const el = document.querySelector(sel);
@@ -84,9 +73,7 @@ function measureBottomNav() {
           break;
         }
       }
-    } catch (e) {
-      /* ignore */
-    }
+    } catch (e) { /* ignore */ }
   }
 
   if (navHeight === 0) {
@@ -98,8 +85,7 @@ function measureBottomNav() {
         if (
           rect.bottom >= window.innerHeight - 5 &&
           rect.top > window.innerHeight * 0.7 &&
-          rect.height > 40 &&
-          rect.height < 120 &&
+          rect.height > 40 && rect.height < 120 &&
           rect.width > window.innerWidth * 0.8
         ) {
           navHeight = rect.height;
@@ -108,24 +94,17 @@ function measureBottomNav() {
       }
     }
   }
-
   if (navHeight === 0) navHeight = 64;
-
   return { isMobile: true, navHeight };
 }
 
-// ══════════════════════════════════════════
-// WarehouseForm
-// ══════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════
+   WarehouseForm (unchanged)
+   ══════════════════════════════════════════════════════════ */
 function WarehouseForm({ initial, onSubmit, onClose }) {
   const { t } = useTranslation();
   const [form, setForm] = useState(
-    initial || {
-      location_name: "",
-      location_name_ta: "",
-      address: "",
-      capacity: "",
-    }
+    initial || { location_name: "", location_name_ta: "", address: "", capacity: "" }
   );
   const [loading, setLoading] = useState(false);
   const [autoTa, setAutoTa] = useState(!initial?.location_name_ta);
@@ -136,11 +115,8 @@ function WarehouseForm({ initial, onSubmit, onClose }) {
     try {
       await onSubmit({ ...form, capacity: parseFloat(form.capacity) || 0 });
       onClose();
-    } catch (err) {
-      toast.error(getErrorMessage(err, t("common.error")));
-    } finally {
-      setLoading(false);
-    }
+    } catch (err) { toast.error(getErrorMessage(err, t("common.error"))); }
+    finally { setLoading(false); }
   };
 
   const handleNameChange = (val) => {
@@ -153,67 +129,33 @@ function WarehouseForm({ initial, onSubmit, onClose }) {
     <form onSubmit={handleSubmit} className="space-y-4">
       <div>
         <label className="label">{t("warehouse.name")} *</label>
-        <input
-          className="input-field"
-          value={form.location_name}
-          onChange={(e) => handleNameChange(e.target.value)}
-          required
-        />
+        <input className="input-field" value={form.location_name} onChange={(e) => handleNameChange(e.target.value)} required />
       </div>
       <div>
         <label className="label flex items-center justify-between">
           <span>{t("warehouse.nameTa")}</span>
-          <button
-            type="button"
-            onClick={() => setAutoTa((a) => !a)}
-            className="text-xs font-normal lowercase"
-            style={{ color: autoTa ? "var(--accent)" : "var(--text-muted)" }}
-          >
+          <button type="button" onClick={() => setAutoTa((a) => !a)} className="text-xs font-normal lowercase"
+            style={{ color: autoTa ? "var(--accent)" : "var(--text-muted)" }}>
             {autoTa ? "⚡ auto" : "manual"}
           </button>
         </label>
-        <input
-          className="input-field"
-          value={form.location_name_ta}
-          onChange={(e) => {
-            setAutoTa(false);
-            setForm((f) => ({ ...f, location_name_ta: e.target.value }));
-          }}
-          placeholder="தமிழ் பெயர்"
-        />
+        <input className="input-field" value={form.location_name_ta}
+          onChange={(e) => { setAutoTa(false); setForm((f) => ({ ...f, location_name_ta: e.target.value })); }}
+          placeholder="தமிழ் பெயர்" />
       </div>
       <div>
         <label className="label">{t("warehouse.address")}</label>
-        <textarea
-          className="input-field resize-none h-20"
-          value={form.address}
-          onChange={(e) => setForm((f) => ({ ...f, address: e.target.value }))}
-        />
+        <textarea className="input-field" style={{ minHeight: 80 }} value={form.address}
+          onChange={(e) => setForm((f) => ({ ...f, address: e.target.value }))} />
       </div>
       <div>
         <label className="label">{t("warehouse.capacity")}</label>
-        <input
-          type="number"
-          step="0.01"
-          min="0"
-          className="input-field"
-          value={form.capacity}
-          onChange={(e) => setForm((f) => ({ ...f, capacity: e.target.value }))}
-        />
+        <input type="number" step="0.01" min="0" className="input-field" value={form.capacity}
+          onChange={(e) => setForm((f) => ({ ...f, capacity: e.target.value }))} />
       </div>
       <div className="flex gap-3 pt-2">
-        <button
-          type="button"
-          onClick={onClose}
-          className="btn-secondary flex-1 justify-center"
-        >
-          {t("common.cancel")}
-        </button>
-        <button
-          type="submit"
-          disabled={loading}
-          className="btn-primary flex-1 justify-center"
-        >
+        <button type="button" onClick={onClose} className="btn-secondary flex-1">{t("common.cancel")}</button>
+        <button type="submit" disabled={loading} className="btn-primary flex-1">
           {loading ? t("common.loading") : t("common.save")}
         </button>
       </div>
@@ -221,32 +163,334 @@ function WarehouseForm({ initial, onSubmit, onClose }) {
   );
 }
 
-// ══════════════════════════════════════════
-// WarehouseStockPanel (FIXED)
-// ══════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════
+   BRAND INFO POPUP
+   Shows arrival details + weight breakdown when a brand row clicked
+   ══════════════════════════════════════════════════════════ */
+function BrandInfoModal({ open, onClose, warehouseId, brandId, brandLabel }) {
+  const { isAdmin } = useAuth();
+  const [info, setInfo] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (open && warehouseId && brandId) {
+      setLoading(true);
+      warehouseApi
+        .getBrandInfo(warehouseId, brandId)
+        .then((r) => setInfo(r.data))
+        .catch(() => setInfo(null))
+        .finally(() => setLoading(false));
+    }
+  }, [open, warehouseId, brandId]);
+
+  return (
+    <Modal open={open} onClose={onClose} title={brandLabel || "Brand Details"} size="lg">
+      {loading ? (
+        <div className="space-y-2">
+          <div className="skeleton h-20 rounded-xl" />
+          <div className="skeleton h-32 rounded-xl" />
+          <div className="skeleton h-24 rounded-xl" />
+        </div>
+      ) : !info ? (
+        <div className="empty-state">
+          <div className="empty-state-icon"><Info size={20} /></div>
+          <p className="empty-state-title">No information available</p>
+          <p className="empty-state-text">Could not load brand details for this warehouse.</p>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {/* ── Total stock summary ── */}
+          <div className="card-accent" style={{ padding: 16 }}>
+            <div className="relative flex items-center justify-between">
+              <div>
+                <p className="text-[10px] font-bold text-white/70 uppercase tracking-wider">Total Stocks</p>
+                <p className="text-3xl font-extrabold text-white tracking-tight mt-1">
+                  {info.total_bags?.toLocaleString() ?? 0}
+                  <span className="text-sm font-medium ml-2 text-white/70">bags</span>
+                </p>
+                <p className="text-xs text-white/60 mt-0.5">
+                  {((info.total_weight_kg ?? 0) / 1000).toFixed(2)} T total
+                </p>
+              </div>
+              <Package size={32} className="text-white/70" />
+            </div>
+          </div>
+
+          {/* ── Weight breakdown: "10KG in X bags, 5KG in Y bags" ── */}
+          {info.weight_breakdown?.length > 0 && (
+            <div className="card" style={{ padding: 16 }}>
+              <div className="flex items-center gap-2 mb-3">
+                <Scale size={14} style={{ color: "var(--accent)" }} />
+                <h3 className="text-sm font-bold" style={{ color: "var(--text-primary)" }}>
+                  Weight Breakdown
+                </h3>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {info.weight_breakdown.map((b, i) => (
+                  <div
+                    key={i}
+                    className="p-3 rounded-xl text-center"
+                    style={{
+                      backgroundColor: "var(--bg-secondary)",
+                      border: "1px solid var(--border-light)",
+                    }}
+                  >
+                    <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
+                      {b.weight_kg} KG
+                    </p>
+                    <p className="text-lg font-extrabold tabular-nums mt-1" style={{ color: "var(--accent)" }}>
+                      {b.quantity?.toLocaleString() ?? 0}
+                    </p>
+                    <p className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+                      {b.label || (b.bags ? `${b.bags} bags` : "units")}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* ── Recent arrivals (where it came from) ── */}
+          {info.recent_arrivals?.length > 0 && (
+            <div className="card" style={{ padding: 16 }}>
+              <div className="flex items-center gap-2 mb-3">
+                <Truck size={14} style={{ color: "var(--success)" }} />
+                <h3 className="text-sm font-bold" style={{ color: "var(--text-primary)" }}>
+                  Recent Arrivals
+                </h3>
+              </div>
+              <div className="space-y-2">
+                {info.recent_arrivals.map((a) => (
+                  <div
+                    key={a.id}
+                    className="p-3 rounded-xl"
+                    style={{
+                      backgroundColor: "var(--bg-secondary)",
+                      border: "1px solid var(--border-light)",
+                      borderLeftWidth: 4,
+                      borderLeftColor: "var(--success)",
+                    }}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="badge badge-success text-[10px]">Arrival</span>
+                          <span className="text-sm font-bold truncate" style={{ color: "var(--text-primary)" }}>
+                            {a.vehicle_number || "—"}
+                          </span>
+                        </div>
+                        <p className="text-[11px] mt-1" style={{ color: "var(--text-muted)" }}>
+                          {format(parseISO(a.transaction_date), "dd MMM yyyy, HH:mm")}
+                        </p>
+
+                        <div className="mt-2 space-y-1">
+                          {a.source && (
+                            <div className="flex items-center gap-1.5 text-[11px]" style={{ color: "var(--text-secondary)" }}>
+                              <MapPin size={10} style={{ color: "var(--text-muted)" }} />
+                              <span><strong>From:</strong> {a.source}</span>
+                            </div>
+                          )}
+                          {a.driver_name && (
+                            <div className="flex items-center gap-1.5 text-[11px]" style={{ color: "var(--text-secondary)" }}>
+                              <User size={10} style={{ color: "var(--text-muted)" }} />
+                              <span>{a.driver_name}{a.driver_number ? ` · ${a.driver_number}` : ""}</span>
+                            </div>
+                          )}
+                          {a.commission_partner && (
+                            <div className="flex items-center gap-1.5 text-[11px]" style={{ color: "var(--text-secondary)" }}>
+                              <Info size={10} style={{ color: "var(--text-muted)" }} />
+                              <span><strong>Partner:</strong> {a.commission_partner}</span>
+                            </div>
+                          )}
+                          {/* Admin-only fields */}
+                          {isAdmin && a.mill_owner_name && (
+                            <span className="badge badge-muted text-[10px] mt-1.5">
+                              Mill: {a.mill_owner_name}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <p className="text-lg font-extrabold tabular-nums" style={{ color: "var(--success)" }}>
+                          +{a.bags ?? a.total_bags ?? 0}
+                        </p>
+                        <p className="text-[10px]" style={{ color: "var(--text-muted)" }}>bags</p>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* ── Rice types in this brand ── */}
+          {info.rice_types?.length > 0 && (
+            <div className="card" style={{ padding: 16 }}>
+              <div className="flex items-center gap-2 mb-3">
+                <Layers size={14} style={{ color: "var(--accent)" }} />
+                <h3 className="text-sm font-bold" style={{ color: "var(--text-primary)" }}>
+                  Rice Types
+                </h3>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {info.rice_types.map((rt, i) => (
+                  <span key={i} className="badge badge-accent">
+                    {rt.name} · {rt.bags ?? 0} bags
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════
+   STOCK ROW INFO MODAL  (small popup for individual stock row)
+   ══════════════════════════════════════════════════════════ */
+function StockRowInfoModal({ open, onClose, stock, warehouseId }) {
+  const [breakdown, setBreakdown] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (open && stock?.stock_id) {
+      setLoading(true);
+      warehouseApi
+        .getWeightBreakdown(warehouseId)
+        .then((r) => {
+          // Filter breakdown for this specific stock
+          const items = r.data?.items?.filter((b) => b.stock_id === stock.stock_id) || [];
+          setBreakdown(items);
+        })
+        .catch(() => setBreakdown([]))
+        .finally(() => setLoading(false));
+    }
+  }, [open, stock, warehouseId]);
+
+  if (!stock) return null;
+
+  return (
+    <Modal open={open} onClose={onClose} title={`${stock.brand_name} · Details`} size="md">
+      {loading ? (
+        <div className="space-y-2">
+          {[1, 2, 3].map((i) => <div key={i} className="skeleton h-14 rounded-xl" />)}
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {/* Summary */}
+          <div className="grid grid-cols-3 gap-2">
+            <div className="card" style={{ padding: 12, textAlign: "center" }}>
+              <p className="text-[10px] uppercase tracking-wider font-bold" style={{ color: "var(--text-muted)" }}>Bags</p>
+              <p className="text-xl font-extrabold tabular-nums mt-1" style={{ color: "var(--accent)" }}>
+                {stock.remaining_bags?.toLocaleString() ?? 0}
+              </p>
+            </div>
+            <div className="card" style={{ padding: 12, textAlign: "center" }}>
+              <p className="text-[10px] uppercase tracking-wider font-bold" style={{ color: "var(--text-muted)" }}>Weight</p>
+              <p className="text-xl font-extrabold tabular-nums mt-1" style={{ color: "var(--text-primary)" }}>
+                {((stock.remaining_kg ?? 0) / 1000).toFixed(2)}T
+              </p>
+            </div>
+            <div className="card" style={{ padding: 12, textAlign: "center" }}>
+              <p className="text-[10px] uppercase tracking-wider font-bold" style={{ color: "var(--text-muted)" }}>Bag Size</p>
+              <p className="text-xl font-extrabold tabular-nums mt-1" style={{ color: "var(--text-primary)" }}>
+                {stock.bag_weight_kg}<span className="text-xs ml-0.5">KG</span>
+              </p>
+            </div>
+          </div>
+
+          {/* Weight breakdown if available */}
+          {breakdown && breakdown.length > 0 && (
+            <div className="card" style={{ padding: 16 }}>
+              <p className="label mb-3">Weight Composition</p>
+              <div className="space-y-2">
+                {breakdown.map((b, i) => (
+                  <div
+                    key={i}
+                    className="flex items-center justify-between p-2.5 rounded-xl"
+                    style={{ backgroundColor: "var(--bg-secondary)", border: "1px solid var(--border-light)" }}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Scale size={12} style={{ color: "var(--accent)" }} />
+                      <span className="text-sm font-bold" style={{ color: "var(--text-primary)" }}>
+                        {b.weight_kg} KG
+                      </span>
+                    </div>
+                    <span className="text-sm font-bold tabular-nums" style={{ color: "var(--text-secondary)" }}>
+                      × {b.quantity}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <p className="text-[10px] mt-3" style={{ color: "var(--text-muted)" }}>
+                e.g. 10KG × 2 + 5KG × 1 = 1 bag of 25KG
+              </p>
+            </div>
+          )}
+
+          {/* Inbound/Outbound history */}
+          <div className="grid grid-cols-2 gap-2">
+            <div
+              className="card"
+              style={{ padding: 12, backgroundColor: "var(--success-soft)", borderColor: "var(--success)" }}
+            >
+              <div className="flex items-center gap-1.5 mb-1">
+                <TrendingUp size={12} style={{ color: "var(--success-text)" }} />
+                <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: "var(--success-text)" }}>
+                  Inbound
+                </p>
+              </div>
+              <p className="text-lg font-extrabold tabular-nums" style={{ color: "var(--success-text)" }}>
+                {stock.total_inbound_bags ?? 0}
+              </p>
+            </div>
+            <div
+              className="card"
+              style={{ padding: 12, backgroundColor: "var(--danger-soft)", borderColor: "var(--danger)" }}
+            >
+              <div className="flex items-center gap-1.5 mb-1">
+                <TrendingDown size={12} style={{ color: "var(--danger-text)" }} />
+                <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: "var(--danger-text)" }}>
+                  Outbound
+                </p>
+              </div>
+              <p className="text-lg font-extrabold tabular-nums" style={{ color: "var(--danger-text)" }}>
+                {stock.total_outbound_bags ?? 0}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════
+   WarehouseStockPanel  (with brand-click info popup)
+   ══════════════════════════════════════════════════════════ */
 function WarehouseStockPanel({ warehouse, onClose }) {
   const { i18n } = useTranslation();
   const [stocks, setStocks] = useState([]);
+  const [breakdown, setBreakdown] = useState(null);
   const [loading, setLoading] = useState(true);
   const [bottomOffset, setBottomOffset] = useState(0);
   const [isMobile, setIsMobile] = useState(false);
 
+  const [brandInfoModal, setBrandInfoModal] = useState(null);
+  const [stockInfoModal, setStockInfoModal] = useState(null);
+
   // ── Lock body scroll & measure bottom nav ──
   useEffect(() => {
     document.body.style.overflow = "hidden";
-
     const measure = () => {
       const result = measureBottomNav();
       setIsMobile(result.isMobile);
       setBottomOffset(result.navHeight);
     };
-
-    const raf = requestAnimationFrame(() => {
-      setTimeout(measure, 50);
-    });
-
+    const raf = requestAnimationFrame(() => { setTimeout(measure, 50); });
     window.addEventListener("resize", measure);
-
     return () => {
       document.body.style.overflow = "";
       cancelAnimationFrame(raf);
@@ -254,51 +498,57 @@ function WarehouseStockPanel({ warehouse, onClose }) {
     };
   }, []);
 
-  // ── Fetch stocks ──
+  // ── Fetch stocks + weight breakdown ──
   useEffect(() => {
-    warehouseApi
-      .getStocks(warehouse.id)
-      .then((r) => setStocks(r.data))
-      .catch(() => setStocks([]))
-      .finally(() => setLoading(false));
+    Promise.all([
+      warehouseApi.getStocks(warehouse.id).then((r) => r.data).catch(() => []),
+      warehouseApi.getWeightBreakdown(warehouse.id).then((r) => r.data).catch(() => null),
+    ]).then(([stockData, breakdownData]) => {
+      // FIX: Filter out 0-stock brands from warehouse panel
+      const nonZeroStocks = stockData.filter((s) => (s.remaining_bags ?? 0) > 0);
+      setStocks(nonZeroStocks);
+      setBreakdown(breakdownData);
+      setLoading(false);
+    });
   }, [warehouse.id]);
 
-  const wName =
-    i18n.language === "ta" && warehouse.location_name_ta
-      ? warehouse.location_name_ta
-      : warehouse.location_name;
+  const wName = i18n.language === "ta" && warehouse.location_name_ta
+    ? warehouse.location_name_ta : warehouse.location_name;
 
-  const sName = (s) =>
-    i18n.language === "ta" && s.brand_name_ta ? s.brand_name_ta : s.brand_name;
-  const rType = (s) =>
-    i18n.language === "ta" && s.rice_type_ta ? s.rice_type_ta : s.rice_type;
+  const sName = (s) => i18n.language === "ta" && s.brand_name_ta ? s.brand_name_ta : s.brand_name;
+  const rType = (s) => i18n.language === "ta" && s.rice_type_ta ? s.rice_type_ta : s.rice_type;
 
-  const totalBags = stocks.reduce((a, s) => a + s.remaining_bags, 0);
+  const totalBags = stocks.reduce((a, s) => a + (s.remaining_bags || 0), 0);
+
+  // Group by brand for brand-click handler
+  const handleBrandClick = (s) => {
+    if (s.brand_id) {
+      setBrandInfoModal({
+        warehouseId: warehouse.id,
+        brandId: s.brand_id,
+        label: `${sName(s)} · ${wName}`,
+      });
+    }
+  };
 
   return (
     <>
       {/* ── Backdrop ── */}
       <div
         style={{
-          position: "fixed",
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          zIndex: 50,
-          backgroundColor: "rgba(0,0,0,0.55)",
+          position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 50,
+          backgroundColor: "rgba(8, 12, 26, 0.6)",
+          backdropFilter: "blur(8px) saturate(150%)",
+          WebkitBackdropFilter: "blur(8px) saturate(150%)",
           animation: "modalFadeIn 0.2s ease-out",
         }}
         onClick={onClose}
       />
 
-      {/* ── Panel Container — sits above bottom nav ── */}
+      {/* ── Panel ── */}
       <div
         style={{
-          position: "fixed",
-          top: 0,
-          left: 0,
-          right: 0,
+          position: "fixed", top: 0, left: 0, right: 0,
           bottom: isMobile ? `${bottomOffset}px` : 0,
           zIndex: 51,
           display: "flex",
@@ -316,100 +566,78 @@ function WarehouseStockPanel({ warehouse, onClose }) {
             display: "flex",
             flexDirection: "column",
             backgroundColor: "var(--bg-card)",
-            borderRadius: isMobile ? "20px 20px 0 0" : "16px",
-            boxShadow: isMobile
-              ? "0 -4px 30px rgba(0,0,0,0.15)"
-              : "0 25px 60px rgba(0,0,0,0.25)",
+            borderRadius: isMobile ? "20px 20px 0 0" : "var(--radius-2xl)",
+            boxShadow: "var(--shadow-xl)",
             overflow: "hidden",
             animation: "modalSlideUp 0.3s ease-out",
+            border: "1px solid var(--border)",
           }}
           onClick={(e) => e.stopPropagation()}
         >
-          {/* Drag handle — mobile */}
+          {/* Drag handle */}
           {isMobile && (
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "center",
-                paddingTop: "8px",
-                paddingBottom: "2px",
-                flexShrink: 0,
-              }}
-            >
-              <div
-                style={{
-                  width: "36px",
-                  height: "4px",
-                  borderRadius: "99px",
-                  backgroundColor: "var(--border)",
-                }}
-              />
+            <div style={{ display: "flex", justifyContent: "center", paddingTop: 8, paddingBottom: 2, flexShrink: 0 }}>
+              <div style={{ width: 36, height: 4, borderRadius: 99, backgroundColor: "var(--border)" }} />
             </div>
           )}
 
           {/* Header */}
           <div
-            className="flex items-center justify-between px-5 py-4 border-b"
-            style={{
-              borderColor: "var(--border)",
-              backgroundColor: "var(--bg-card)",
-              flexShrink: 0,
-            }}
+            className="flex items-center justify-between px-5 py-4"
+            style={{ borderBottom: "1px solid var(--border-light)", flexShrink: 0 }}
           >
             <div>
-              <h2
-                className="font-display font-bold text-lg"
-                style={{ color: "var(--text-primary)" }}
-              >
+              <h2 className="text-lg font-extrabold tracking-tight" style={{ color: "var(--text-primary)" }}>
                 {wName}
               </h2>
-              <p
-                className="text-xs mt-0.5"
-                style={{ color: "var(--text-muted)" }}
-              >
-                {totalBags.toLocaleString()} bags ·{" "}
-                {(warehouse.total_stock_kg / 1000).toFixed(2)} T
+              <p className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
+                <span className="font-bold tabular-nums" style={{ color: "var(--accent)" }}>
+                  {totalBags.toLocaleString()}
+                </span>
+                {" "}total bags · {((warehouse.total_stock_kg ?? 0) / 1000).toFixed(2)} T
               </p>
             </div>
-            <button
-              onClick={onClose}
-              className="p-2 rounded-xl hover:bg-black/10 transition-colors"
-              style={{ color: "var(--text-muted)" }}
-            >
-              <X size={20} />
+            <button onClick={onClose} className="btn-ghost" style={{ padding: 8 }}>
+              <X size={18} />
             </button>
           </div>
 
-          {/* Capacity bar — pinned, not scrollable */}
+          {/* Capacity */}
           <div
-            className="px-5 py-3 border-b"
-            style={{ borderColor: "var(--border)", flexShrink: 0 }}
+            className="px-5 py-3"
+            style={{ borderBottom: "1px solid var(--border-light)", flexShrink: 0 }}
           >
-            <div
-              className="flex justify-between text-xs mb-1.5"
-              style={{ color: "var(--text-muted)" }}
-            >
+            <div className="flex justify-between text-xs mb-1.5" style={{ color: "var(--text-muted)" }}>
               <span>Capacity Used</span>
-              <span
-                className="font-semibold"
-                style={{ color: "var(--accent)" }}
-              >
-                {warehouse.stock_percentage.toFixed(1)}%
+              <span className="font-bold" style={{ color: "var(--accent)" }}>
+                {warehouse.stock_percentage?.toFixed(1)}%
               </span>
             </div>
             <StockLevelBar percentage={warehouse.stock_percentage} />
-            <div
-              className="flex justify-between text-xs mt-1"
-              style={{ color: "var(--text-muted)" }}
-            >
-              <span>
-                {(warehouse.total_stock_kg / 1000).toFixed(2)} T used
-              </span>
+            <div className="flex justify-between text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+              <span>{((warehouse.total_stock_kg ?? 0) / 1000).toFixed(2)} T used</span>
               <span>{warehouse.capacity} T total</span>
             </div>
           </div>
 
-          {/* ── Scrollable stock list ── */}
+          {/* Aggregated weight breakdown banner */}
+          {breakdown?.summary?.length > 0 && (
+            <div
+              className="px-5 py-3"
+              style={{ borderBottom: "1px solid var(--border-light)", flexShrink: 0, backgroundColor: "var(--bg-secondary)" }}
+            >
+              <p className="label" style={{ marginBottom: 6 }}>Weight Distribution</p>
+              <div className="flex flex-wrap gap-1.5">
+                {breakdown.summary.map((b, i) => (
+                  <span key={i} className="badge badge-muted text-[10px]">
+                    <Scale size={9} /> {b.weight_kg}KG × {b.quantity?.toLocaleString() ?? 0}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Stock list */}
           <div
             style={{
               flex: 1,
@@ -422,74 +650,76 @@ function WarehouseStockPanel({ warehouse, onClose }) {
             {loading ? (
               <div className="space-y-3 p-5">
                 {[...Array(3)].map((_, i) => (
-                  <div
-                    key={i}
-                    className="h-16 rounded-xl animate-pulse-soft"
-                    style={{ backgroundColor: "var(--bg-secondary)" }}
-                  />
+                  <div key={i} className="skeleton h-20 rounded-xl" />
                 ))}
               </div>
             ) : stocks.length === 0 ? (
-              <div
-                className="py-16 text-center"
-                style={{ color: "var(--text-muted)" }}
-              >
-                <Package size={36} className="mx-auto mb-3 opacity-30" />
-                <p className="text-sm">No stock in this warehouse yet</p>
+              <div className="empty-state">
+                <div className="empty-state-icon"><Package size={20} /></div>
+                <p className="empty-state-title">No stock yet</p>
+                <p className="empty-state-text">No items have been added to this warehouse.</p>
               </div>
             ) : (
               <div className="p-4 space-y-2">
                 {stocks.map((s) => {
-                  const pct =
-                    s.total_inbound_bags > 0
-                      ? Math.round(
-                          (s.remaining_bags / s.total_inbound_bags) * 100
-                        )
-                      : 0;
+                  const pct = s.total_inbound_bags > 0
+                    ? Math.round((s.remaining_bags / s.total_inbound_bags) * 100) : 0;
                   return (
                     <div
                       key={s.stock_id}
-                      className="rounded-xl p-4 border transition-all duration-200"
+                      className="card"
                       style={{
-                        backgroundColor: "var(--bg-secondary)",
-                        borderColor: "var(--border)",
+                        padding: 14,
+                        cursor: "pointer",
+                        transition: "all var(--transition-fast)",
+                      }}
+                      onClick={() => handleBrandClick(s)}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.borderColor = "var(--accent-muted)";
+                        e.currentTarget.style.boxShadow = "var(--shadow-md)";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.borderColor = "var(--border)";
+                        e.currentTarget.style.boxShadow = "var(--shadow-sm)";
                       }}
                     >
                       <div className="flex items-start justify-between gap-2 mb-3">
-                        <div className="min-w-0">
-                          <div
-                            className="font-semibold text-sm truncate"
-                            style={{ color: "var(--text-primary)" }}
-                          >
+                        <div className="min-w-0 flex-1">
+                          <div className="font-bold text-sm truncate" style={{ color: "var(--text-primary)" }}>
                             {sName(s)}
                           </div>
-                          <div
-                            className="text-xs mt-0.5"
-                            style={{ color: "var(--text-muted)" }}
-                          >
-                            {rType(s)} · {s.bag_weight_kg}kg/bag
+                          <div className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
+                            {rType(s)} · {s.bag_weight_kg}KG/bag
                           </div>
                         </div>
-                        <div className="text-right shrink-0">
-                          <div
-                            className="font-bold text-lg font-display leading-none"
-                            style={{
-                              color:
-                                s.remaining_bags > 0
-                                  ? "var(--accent)"
-                                  : "var(--text-muted)",
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          <div className="text-right">
+                            <div
+                              className="font-extrabold text-lg leading-none tabular-nums"
+                              style={{ color: s.remaining_bags > 0 ? "var(--accent)" : "var(--text-muted)" }}
+                            >
+                              {s.remaining_bags?.toLocaleString() ?? 0}
+                            </div>
+                            <div className="text-[10px] mt-0.5" style={{ color: "var(--text-muted)" }}>bags</div>
+                          </div>
+
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setStockInfoModal(s);
                             }}
+                            className="btn-ghost tooltip"
+                            data-tooltip="View details"
+                            style={{ padding: 6 }}
                           >
-                            {s.remaining_bags.toLocaleString()}
-                          </div>
-                          <div
-                            className="text-xs"
-                            style={{ color: "var(--text-muted)" }}
-                          >
-                            bags
-                          </div>
+                            <Info size={16} style={{ color: "var(--accent)" }} />
+                          </button>
+
+                          <ChevronRight size={14} style={{ color: "var(--text-muted)" }} />
                         </div>
                       </div>
+
                       {/* Mini progress bar */}
                       <div
                         className="h-1.5 rounded-full overflow-hidden mb-2"
@@ -500,28 +730,26 @@ function WarehouseStockPanel({ warehouse, onClose }) {
                           style={{
                             width: `${pct}%`,
                             backgroundColor:
-                              s.remaining_bags > 100
-                                ? "#10b981"
-                                : s.remaining_bags > 20
-                                ? "#f59e0b"
-                                : "#ef4444",
+                              s.remaining_bags > 100 ? "var(--success)"
+                                : s.remaining_bags > 20 ? "var(--warning)"
+                                  : "var(--danger)",
                           }}
                         />
                       </div>
-                      <div
-                        className="flex justify-between text-xs"
-                        style={{ color: "var(--text-muted)" }}
-                      >
+
+                      <div className="flex justify-between text-xs" style={{ color: "var(--text-muted)" }}>
                         <span className="flex items-center gap-1">
-                          <TrendingUp size={10} className="text-emerald-500" />{" "}
-                          {s.total_inbound_bags} in
+                          <TrendingUp size={10} style={{ color: "var(--success)" }} /> {s.total_inbound_bags ?? 0} in
                         </span>
-                        <span>{(s.remaining_kg / 1000).toFixed(2)} T</span>
+                        <span className="tabular-nums">{((s.remaining_kg ?? 0) / 1000).toFixed(2)} T</span>
                         <span className="flex items-center gap-1">
-                          <TrendingDown size={10} className="text-red-400" />{" "}
-                          {s.total_outbound_bags} out
+                          <TrendingDown size={10} style={{ color: "var(--danger)" }} /> {s.total_outbound_bags ?? 0} out
                         </span>
                       </div>
+
+                      <p className="text-[10px] mt-2 text-center" style={{ color: "var(--accent)" }}>
+                        Tap card for arrival info →
+                      </p>
                     </div>
                   );
                 })}
@@ -531,7 +759,23 @@ function WarehouseStockPanel({ warehouse, onClose }) {
         </div>
       </div>
 
-      {/* Keyframes */}
+      {/* Brand info popup */}
+      <BrandInfoModal
+        open={!!brandInfoModal}
+        onClose={() => setBrandInfoModal(null)}
+        warehouseId={brandInfoModal?.warehouseId}
+        brandId={brandInfoModal?.brandId}
+        brandLabel={brandInfoModal?.label}
+      />
+
+      {/* Stock row info popup */}
+      <StockRowInfoModal
+        open={!!stockInfoModal}
+        onClose={() => setStockInfoModal(null)}
+        stock={stockInfoModal}
+        warehouseId={warehouse.id}
+      />
+
       <style>{`
         @keyframes modalSlideUp {
           from { opacity: 0; transform: translateY(60px); }
@@ -546,9 +790,9 @@ function WarehouseStockPanel({ warehouse, onClose }) {
   );
 }
 
-// ══════════════════════════════════════════
-// WarehousesPage (main export)
-// ══════════════════════════════════════════
+/* ══════════════════════════════════════════════════════════
+   MAIN PAGE
+   ══════════════════════════════════════════════════════════ */
 export default function WarehousesPage() {
   const { t, i18n } = useTranslation();
   const { isAdmin } = useAuth();
@@ -560,61 +804,47 @@ export default function WarehousesPage() {
 
   const load = useCallback(() => {
     setLoading(true);
-    warehouseApi
-      .list()
-      .then((r) => setWarehouses(r.data))
-      .finally(() => setLoading(false));
+    warehouseApi.list().then((r) => setWarehouses(r.data)).finally(() => setLoading(false));
   }, []);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  useEffect(() => { load(); }, [load]);
 
   const handleCreate = async (data) => {
     await warehouseApi.create(data);
-    toast.success("Warehouse created");
-    load();
+    toast.success("Warehouse created"); load();
   };
-
   const handleUpdate = async (data) => {
     await warehouseApi.update(modal.data.id, data);
-    toast.success("Warehouse updated");
-    load();
+    toast.success("Warehouse updated"); load();
   };
-
   const handleDelete = async () => {
     await warehouseApi.delete(deleteTarget.id);
-    toast.success("Warehouse removed");
-    setDeleteTarget(null);
-    load();
+    toast.success("Warehouse removed"); setDeleteTarget(null); load();
   };
 
-  const name = (w) =>
-    i18n.language === "ta" && w.location_name_ta
-      ? w.location_name_ta
-      : w.location_name;
+  const name = (w) => i18n.language === "ta" && w.location_name_ta ? w.location_name_ta : w.location_name;
+
+  // Aggregate totals across all warehouses for top banner
+  const grandTotalBags = warehouses.reduce((s, w) => s + (w.total_bags || 0), 0);
+  const grandTotalKg = warehouses.reduce((s, w) => s + (w.total_stock_kg || 0), 0);
 
   return (
     <div className="space-y-5 animate-fade-in">
       {/* ── Page header ── */}
-      <div className="flex items-center justify-between">
+      <div className="page-header">
         <div>
-          <h1
-            className="font-display font-bold text-2xl"
-            style={{ color: "var(--text-primary)" }}
-          >
-            {t("warehouse.title")}
-          </h1>
-          <p className="text-sm mt-0.5" style={{ color: "var(--text-muted)" }}>
-            {warehouses.length} active{" "}
-            {warehouses.length === 1 ? "warehouse" : "warehouses"}
+          <h1 className="page-title">{t("warehouse.title")}</h1>
+          <p className="page-subtitle">
+            {warehouses.length} {warehouses.length === 1 ? "warehouse" : "warehouses"}
+            {" · "}
+            <span className="font-bold tabular-nums" style={{ color: "var(--text-primary)" }}>
+              {grandTotalBags.toLocaleString()} total bags
+            </span>
+            <span style={{ color: "var(--text-muted)" }}> ({(grandTotalKg / 1000).toFixed(2)} T)</span>
           </p>
         </div>
         {isAdmin && (
-          <button
-            onClick={() => setModal({ mode: "create" })}
-            className="btn-primary"
-          >
+          <button onClick={() => setModal({ mode: "create" })} className="btn-primary">
             <Plus size={16} /> {t("warehouse.add")}
           </button>
         )}
@@ -623,17 +853,15 @@ export default function WarehousesPage() {
       {/* ── Warehouse grid ── */}
       {loading ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {[...Array(3)].map((_, i) => (
-            <div key={i} className="card h-52 animate-pulse-soft" />
-          ))}
+          {[...Array(3)].map((_, i) => <div key={i} className="card skeleton h-52" />)}
         </div>
       ) : warehouses.length === 0 ? (
-        <div
-          className="card text-center py-16"
-          style={{ color: "var(--text-muted)" }}
-        >
-          <MapPin size={40} className="mx-auto mb-3 opacity-30" />
-          <p>{t("common.noData")}</p>
+        <div className="card">
+          <div className="empty-state">
+            <div className="empty-state-icon"><MapPin size={20} /></div>
+            <p className="empty-state-title">{t("common.noData")}</p>
+            <p className="empty-state-text">Add your first warehouse to start tracking stock.</p>
+          </div>
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -643,7 +871,7 @@ export default function WarehousesPage() {
             return (
               <div
                 key={w.id}
-                className="card hover:shadow-lg cursor-pointer group transition-all duration-200 hover:-translate-y-0.5 active:scale-[0.99]"
+                className={`card-hover stagger-${(idx % 5) + 1} animate-slide-up group`}
                 onClick={() => setDetailWarehouse(w)}
               >
                 <div className="flex items-start justify-between mb-4">
@@ -651,27 +879,14 @@ export default function WarehousesPage() {
                     <div className="flex items-center gap-2">
                       <div
                         className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0"
-                        style={{
-                          backgroundColor: iconColor + "22",
-                          border: `1.5px solid ${iconColor}44`,
-                        }}
+                        style={{ backgroundColor: iconColor + "22", border: `1.5px solid ${iconColor}44` }}
                       >
                         <IconComponent size={18} style={{ color: iconColor }} />
                       </div>
-                      <h3
-                        className="font-semibold truncate"
-                        style={{ color: "var(--text-primary)" }}
-                      >
-                        {name(w)}
-                      </h3>
+                      <h3 className="font-bold truncate" style={{ color: "var(--text-primary)" }}>{name(w)}</h3>
                     </div>
                     {w.address && (
-                      <p
-                        className="text-xs mt-1.5 ml-11 truncate"
-                        style={{ color: "var(--text-muted)" }}
-                      >
-                        {w.address}
-                      </p>
+                      <p className="text-xs mt-1.5 ml-11 truncate" style={{ color: "var(--text-muted)" }}>{w.address}</p>
                     )}
                   </div>
                   {isAdmin && (
@@ -679,17 +894,10 @@ export default function WarehousesPage() {
                       className="flex gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
                       onClick={(e) => e.stopPropagation()}
                     >
-                      <button
-                        onClick={() => setModal({ mode: "edit", data: w })}
-                        className="p-1.5 rounded-lg hover:bg-black/10 transition-colors"
-                        style={{ color: "var(--text-muted)" }}
-                      >
+                      <button onClick={() => setModal({ mode: "edit", data: w })} className="btn-ghost" style={{ padding: 6 }}>
                         <Pencil size={14} />
                       </button>
-                      <button
-                        onClick={() => setDeleteTarget(w)}
-                        className="p-1.5 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors text-red-400"
-                      >
+                      <button onClick={() => setDeleteTarget(w)} className="btn-ghost" style={{ padding: 6, color: "var(--danger)" }}>
                         <Trash2 size={14} />
                       </button>
                     </div>
@@ -697,77 +905,41 @@ export default function WarehousesPage() {
                 </div>
 
                 <div className="space-y-3">
-                  {/* Stats row */}
                   <div className="grid grid-cols-2 gap-2">
-                    <div
-                      className="rounded-xl p-3 text-center"
-                      style={{ backgroundColor: "var(--bg-secondary)" }}
-                    >
-                      <div
-                        className="font-bold text-lg font-display leading-none"
-                        style={{ color: iconColor }}
-                      >
-                        {w.total_bags.toLocaleString()}
+                    <div className="rounded-xl p-3 text-center" style={{ backgroundColor: "var(--bg-secondary)" }}>
+                      <div className="font-extrabold text-lg leading-none tabular-nums" style={{ color: iconColor }}>
+                        {(w.total_bags ?? 0).toLocaleString()}
                       </div>
-                      <div
-                        className="text-xs mt-0.5"
-                        style={{ color: "var(--text-muted)" }}
-                      >
-                        bags
-                      </div>
+                      <div className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>bags</div>
                     </div>
-                    <div
-                      className="rounded-xl p-3 text-center"
-                      style={{ backgroundColor: "var(--bg-secondary)" }}
-                    >
-                      <div
-                        className="font-bold text-lg font-display leading-none"
-                        style={{ color: "var(--text-primary)" }}
-                      >
-                        {(w.total_stock_kg / 1000).toFixed(1)}
+                    <div className="rounded-xl p-3 text-center" style={{ backgroundColor: "var(--bg-secondary)" }}>
+                      <div className="font-extrabold text-lg leading-none tabular-nums" style={{ color: "var(--text-primary)" }}>
+                        {((w.total_stock_kg ?? 0) / 1000).toFixed(1)}
                       </div>
-                      <div
-                        className="text-xs mt-0.5"
-                        style={{ color: "var(--text-muted)" }}
-                      >
-                        tonnes
-                      </div>
+                      <div className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>tonnes</div>
                     </div>
                   </div>
 
-                  {/* Stock level bar */}
                   <div>
-                    <div
-                      className="flex justify-between text-xs mb-1.5"
-                      style={{ color: "var(--text-muted)" }}
-                    >
+                    <div className="flex justify-between text-xs mb-1.5" style={{ color: "var(--text-muted)" }}>
                       <span>{t("warehouse.stockLevel")}</span>
-                      <span
-                        className="font-semibold"
-                        style={{ color: iconColor }}
-                      >
-                        {w.stock_percentage.toFixed(1)}%
+                      <span className="font-bold" style={{ color: iconColor }}>
+                        {(w.stock_percentage ?? 0).toFixed(1)}%
                       </span>
                     </div>
-                    <StockLevelBar
-                      percentage={w.stock_percentage}
-                      color={iconColor}
-                    />
-                    <div
-                      className="text-right text-xs mt-1"
-                      style={{ color: "var(--text-muted)" }}
-                    >
+                    <StockLevelBar percentage={w.stock_percentage} color={iconColor} />
+                    <div className="text-right text-xs mt-1" style={{ color: "var(--text-muted)" }}>
                       cap: {w.capacity} T
                     </div>
                   </div>
                 </div>
 
-                {/* Tap hint */}
                 <div
-                  className="mt-3 pt-3 border-t flex items-center justify-center gap-1.5 text-xs font-medium"
-                  style={{ borderColor: "var(--border)", color: iconColor }}
+                  className="mt-3 pt-3 flex items-center justify-center gap-1.5 text-xs font-medium"
+                  style={{ borderTop: "1px solid var(--border-light)", color: iconColor }}
                 >
                   <Package size={12} /> View Rice Stocks
+                  <ChevronRight size={12} />
                 </div>
               </div>
             );
@@ -775,21 +947,16 @@ export default function WarehousesPage() {
         </div>
       )}
 
-      {/* ── Warehouse stock detail panel ── */}
+      {/* Detail panel */}
       {detailWarehouse && (
-        <WarehouseStockPanel
-          warehouse={detailWarehouse}
-          onClose={() => setDetailWarehouse(null)}
-        />
+        <WarehouseStockPanel warehouse={detailWarehouse} onClose={() => setDetailWarehouse(null)} />
       )}
 
-      {/* ── Add / Edit modal ── */}
+      {/* Add/Edit modal */}
       <Modal
         open={!!modal}
         onClose={() => setModal(null)}
-        title={
-          modal?.mode === "create" ? t("warehouse.add") : t("warehouse.edit")
-        }
+        title={modal?.mode === "create" ? t("warehouse.add") : t("warehouse.edit")}
       >
         {modal && (
           <WarehouseForm
@@ -800,7 +967,7 @@ export default function WarehousesPage() {
         )}
       </Modal>
 
-      {/* ── Delete confirm ── */}
+      {/* Delete confirm */}
       <ConfirmDialog
         open={!!deleteTarget}
         onClose={() => setDeleteTarget(null)}

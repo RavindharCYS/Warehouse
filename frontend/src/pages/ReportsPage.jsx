@@ -1,583 +1,1185 @@
-import React, { useEffect, useState } from "react";
+// pages/ReportsPage.jsx
+import React, { useEffect, useState, useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import {
   BarChart3, Package, TrendingUp, TrendingDown,
-  ArrowLeftRight
+  ArrowLeftRight, Filter, FileText, FileSpreadsheet,
+  Calendar, X, RefreshCw, IndianRupee, User, Truck,
+  ChevronDown, ChevronUp,
 } from "lucide-react";
-import { format } from "date-fns";
-import { transactionApi, stockApi, warehouseApi } from "../utils/api";
+import {
+  format, subDays, startOfMonth, endOfMonth,
+  startOfWeek, endOfWeek, parseISO,
+} from "date-fns";
+import toast from "react-hot-toast";
+import {
+  reportsApi, transactionApi, stockApi, brandApi,
+  warehouseApi, millOwnerApi, getErrorMessage,
+  exportTransactionsCsv,
+} from "../utils/api";
+import { useAuth } from "../hooks/useAuth";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, Legend,
-  ResponsiveContainer, CartesianGrid
+  ResponsiveContainer, CartesianGrid,
 } from "recharts";
 
+/* ──────────────────────────────────────────────────────────
+   DATE PRESETS
+   ────────────────────────────────────────────────────────── */
+const DATE_PRESETS = [
+  { key: "today",     label: "Today",   getRange: () => ({ from: new Date(), to: new Date() }) },
+  { key: "yesterday", label: "Yest",    getRange: () => ({ from: subDays(new Date(), 1), to: subDays(new Date(), 1) }) },
+  { key: "7d",        label: "7d",      getRange: () => ({ from: subDays(new Date(), 6), to: new Date() }) },
+  { key: "14d",       label: "14d",     getRange: () => ({ from: subDays(new Date(), 13), to: new Date() }) },
+  { key: "30d",       label: "30d",     getRange: () => ({ from: subDays(new Date(), 29), to: new Date() }) },
+  { key: "thisWeek",  label: "Week",    getRange: () => ({ from: startOfWeek(new Date()), to: endOfWeek(new Date()) }) },
+  { key: "thisMonth", label: "Month",   getRange: () => ({ from: startOfMonth(new Date()), to: endOfMonth(new Date()) }) },
+];
+
+const fmtDate = (d) => format(d, "yyyy-MM-dd");
+
+/* ══════════════════════════════════════════════════════════
+   COLLAPSIBLE SECTION (Mobile-friendly accordion)
+   ══════════════════════════════════════════════════════════ */
+function CollapsibleSection({ title, subtitle, icon: Icon, iconColor, iconBg, defaultOpen = true, badge, children }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setOpen((v) => !v)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setOpen((v) => !v);
+          }
+        }}
+        className="flex items-center justify-between cursor-pointer"
+        style={{
+          padding: "12px 14px",
+          backgroundColor: open ? "transparent" : "var(--bg-secondary)",
+          borderBottom: open ? "1px solid var(--border-light)" : "none",
+          transition: "background-color 0.15s",
+        }}
+      >
+        <div className="flex items-center gap-2.5 min-w-0 flex-1">
+          {Icon && (
+            <div
+              className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
+              style={{ backgroundColor: iconBg || "var(--accent-soft)" }}
+            >
+              <Icon size={14} style={{ color: iconColor || "var(--accent)" }} />
+            </div>
+          )}
+          <div className="min-w-0">
+            <h2 className="text-[13px] font-bold leading-tight" style={{ color: "var(--text-primary)" }}>
+              {title}
+            </h2>
+            {subtitle && (
+              <p className="text-[9px] font-bold uppercase tracking-wider mt-0.5" style={{ color: "var(--text-muted)" }}>
+                {subtitle}
+              </p>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 shrink-0 ml-2">
+          {badge}
+          <ChevronDown
+            size={16}
+            style={{
+              color: "var(--text-muted)",
+              transform: open ? "rotate(180deg)" : "rotate(0deg)",
+              transition: "transform 0.2s",
+            }}
+          />
+        </div>
+      </div>
+      {open && <div style={{ padding: 14 }}>{children}</div>}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════
+   MAIN PAGE
+   ══════════════════════════════════════════════════════════ */
 export default function ReportsPage() {
   const { t, i18n } = useTranslation();
+  const { isAdmin } = useAuth();
+
+  // Master data
   const [stocks, setStocks] = useState([]);
   const [transactions, setTransactions] = useState([]);
+  const [brands, setBrands] = useState([]);
+  const [warehouses, setWarehouses] = useState([]);
+  const [millOwners, setMillOwners] = useState([]);
+
+  // UI state
   const [loading, setLoading] = useState(true);
+  const [exporting, setExporting] = useState(false);
+  const [showFilters, setShowFilters] = useState(false);
+  const [showDateRange, setShowDateRange] = useState(false);
 
+  // Filters
+  const [dateFrom, setDateFrom] = useState(fmtDate(subDays(new Date(), 13)));
+  const [dateTo, setDateTo] = useState(fmtDate(new Date()));
+  const [activePreset, setActivePreset] = useState("14d");
+  const [filterBrand, setFilterBrand] = useState("");
+  const [filterWarehouse, setFilterWarehouse] = useState("");
+  const [filterType, setFilterType] = useState("");
+  const [filterMillOwner, setFilterMillOwner] = useState("");
+  const [filterVehicle, setFilterVehicle] = useState("");
+
+  /* ── Load masters once ── */
   useEffect(() => {
-    Promise.all([
-      stockApi.list().then((r) => setStocks(r.data)),
-      transactionApi.list({ limit: 200 }).then((r) => setTransactions(r.data)),
-    ]).finally(() => setLoading(false));
-  }, []);
+    brandApi.list().then((r) => setBrands(r.data || [])).catch(() => {});
+    warehouseApi.list().then((r) => setWarehouses(r.data || [])).catch(() => {});
+    stockApi.list().then((r) => setStocks(r.data || [])).catch(() => {});
+    if (isAdmin) {
+      millOwnerApi.list().then((r) => setMillOwners(r.data || [])).catch(() => {});
+    }
+  }, [isAdmin]);
 
-  const stockName = (s) =>
-    s
-      ? i18n.language === "ta" && s.brand_name_ta
-        ? s.brand_name_ta
-        : s.brand_name
-      : "—";
+  /* ── Build params ── */
+  const params = useMemo(() => {
+    const p = { date_from: dateFrom, date_to: dateTo };
+    if (filterBrand)     p.brand_id = filterBrand;
+    if (filterWarehouse) p.warehouse_id = filterWarehouse;
+    if (filterType)      p.type = filterType;
+    if (filterMillOwner) p.mill_owner_name = filterMillOwner;
+    if (filterVehicle)   p.vehicle_no = filterVehicle;
+    return p;
+  }, [dateFrom, dateTo, filterBrand, filterWarehouse, filterType, filterMillOwner, filterVehicle]);
 
-  // Build daily chart data
-  const dailyMap = {};
-  transactions.forEach((tx) => {
-    const day = format(new Date(tx.transaction_date), "dd MMM");
-    if (!dailyMap[day]) dailyMap[day] = { day, inbound: 0, outbound: 0 };
-    if (tx.transaction_type === "inbound") dailyMap[day].inbound += tx.quantity_bags;
-    else dailyMap[day].outbound += tx.quantity_bags;
-  });
-  const chartData = Object.values(dailyMap).slice(-14);
+  /* ── Load report data ── */
+  const loadReport = useCallback(() => {
+    setLoading(true);
+    reportsApi.get(params)
+      .then((r) => setTransactions(r.data?.transactions || r.data || []))
+      .catch(() => {
+        transactionApi.list({ ...params, limit: 500 })
+          .then((r) => setTransactions(r.data || []))
+          .catch(() => setTransactions([]));
+      })
+      .finally(() => setLoading(false));
+  }, [params]);
 
-  // Stock breakdown
-  const stockBreakdown = stocks
-    .map((s) => ({
-      name: stockName(s),
-      bags: s.remaining_bags,
-    }))
-    .filter((s) => s.bags > 0);
+  useEffect(() => { loadReport(); }, [loadReport]);
 
-  // Summary stats
-  const totalInbound = transactions
-    .filter((tx) => tx.transaction_type === "inbound")
-    .reduce((sum, tx) => sum + tx.quantity_bags, 0);
-  const totalOutbound = transactions
-    .filter((tx) => tx.transaction_type === "outbound")
-    .reduce((sum, tx) => sum + tx.quantity_bags, 0);
-  const totalBags = stocks.reduce((sum, s) => sum + s.remaining_bags, 0);
+  /* ── Apply preset ── */
+  const applyPreset = (key) => {
+    const preset = DATE_PRESETS.find((p) => p.key === key);
+    if (!preset) return;
+    const { from, to } = preset.getRange();
+    setDateFrom(fmtDate(from));
+    setDateTo(fmtDate(to));
+    setActivePreset(key);
+  };
 
-  if (loading) {
+  /* ── Export handlers ── */
+  const handleExport = (formatType) => {
+    if (transactions.length === 0) return;
+    setExporting(true);
+    try {
+      const filename = `report_${dateFrom}_to_${dateTo}.${formatType}`;
+      if (formatType === "csv") {
+        exportTransactionsCsv(transactions, isAdmin, filename);
+        toast.success("Exported as CSV");
+      } else {
+        const headers = [
+          "Date", "Type", "Vehicle", "Driver", "Driver Number",
+          "Source / Destination", "Commission Partner",
+          "Total Bags", "Total KG",
+          ...(isAdmin ? ["Mill Owner", "Price/Bag", "Sell Price/Bag", "Rent", "Hidden Charges", "P/L per Bag"] : []),
+          "Notes",
+        ];
+        const rows = transactions.map((tx) => {
+          const isIn = tx.transaction_type === "inbound";
+          const pl = tx.price != null && tx.sell_price != null
+            ? (Number(tx.sell_price) - Number(tx.price)).toFixed(2) : "";
+          return [
+            new Date(tx.transaction_date).toLocaleString(),
+            isIn ? "Arrival" : "Send",
+            tx.vehicle_number || "",
+            tx.driver_name || "",
+            tx.driver_number || "",
+            (isIn ? tx.source : tx.destination) || "",
+            tx.commission_partner || "",
+            tx.total_bags ?? 0,
+            (tx.total_weight_kg ?? 0).toFixed(1),
+            ...(isAdmin ? [
+              tx.mill_owner_name || "",
+              tx.price != null ? tx.price : "",
+              tx.sell_price != null ? tx.sell_price : "",
+              tx.rent != null ? tx.rent : "",
+              tx.hidden_charges != null ? tx.hidden_charges : "",
+              pl,
+            ] : []),
+            tx.notes || "",
+          ];
+        });
+
+        const escape = (v) => String(v ?? "")
+          .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+        const toRow = (cells, bold = false) =>
+          `<Row>${cells.map((c) => {
+            const isNum = typeof c === "number" || (!isNaN(parseFloat(c)) && c !== "" && !isNaN(c));
+            const type = isNum ? "Number" : "String";
+            const style = bold ? ` ss:StyleID="header"` : "";
+            return `<Cell${style}><Data ss:Type="${type}">${escape(c)}</Data></Cell>`;
+          }).join("")}</Row>`;
+
+        const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+  xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+  <Styles>
+    <Style ss:ID="header">
+      <Font ss:Bold="1"/>
+      <Interior ss:Color="#E8E0F7" ss:Pattern="Solid"/>
+    </Style>
+  </Styles>
+  <Worksheet ss:Name="Transactions">
+    <Table>
+      ${toRow(headers, true)}
+      ${rows.map((r) => toRow(r)).join("\n      ")}
+    </Table>
+  </Worksheet>
+</Workbook>`;
+
+        const blob = new Blob([xml], { type: "application/vnd.ms-excel;charset=utf-8;" });
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.setAttribute("download", filename);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+        toast.success("Exported as XLSX");
+      }
+    } catch (err) {
+      toast.error(getErrorMessage(err, `Failed to export ${formatType.toUpperCase()}`));
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  /* ── Clear filters ── */
+  const clearFilters = () => {
+    setFilterBrand(""); setFilterWarehouse(""); setFilterType("");
+    setFilterMillOwner(""); setFilterVehicle("");
+  };
+
+  const activeFilterCount = [filterBrand, filterWarehouse, filterType, filterMillOwner, filterVehicle].filter(Boolean).length;
+
+  /* ── Helpers ── */
+  const stockName = (tx) => {
+    if (tx.items?.length) {
+      const first = tx.items[0];
+      const brand = first.brand?.name || first.brand_name || "—";
+      return tx.items.length > 1 ? `${brand} +${tx.items.length - 1}` : brand;
+    }
+    if (tx.stock) {
+      return i18n.language === "ta" && tx.stock.brand_name_ta ? tx.stock.brand_name_ta : tx.stock.brand_name;
+    }
+    return "—";
+  };
+
+  const txBags = (tx) => tx.total_bags ?? tx.quantity_bags ?? 0;
+  const txKg = (tx) => tx.total_weight_kg ?? tx.quantity_kg ?? 0;
+
+  /* ── Aggregations ── */
+  const chartData = useMemo(() => {
+    const dailyMap = {};
+    transactions.forEach((tx) => {
+      const day = format(new Date(tx.transaction_date), "dd MMM");
+      if (!dailyMap[day]) dailyMap[day] = { day, inbound: 0, outbound: 0 };
+      if (tx.transaction_type === "inbound") dailyMap[day].inbound += txBags(tx);
+      else dailyMap[day].outbound += txBags(tx);
+    });
+    return Object.values(dailyMap);
+  }, [transactions]);
+
+  const stockBreakdown = useMemo(() => {
+    const map = {};
+    stocks.forEach((s) => {
+      const name = i18n.language === "ta" && s.brand_name_ta
+        ? s.brand_name_ta : (s.brand_name || s.brand?.name || "—");
+      if (!map[name]) map[name] = { name, bags: 0 };
+      map[name].bags += s.total_bags ?? s.remaining_bags ?? 0;
+    });
+    return Object.values(map).filter((s) => s.bags > 0).sort((a, b) => b.bags - a.bags);
+  }, [stocks, i18n.language]);
+
+  const totals = useMemo(() => {
+    let inbound = 0, outbound = 0, profit = 0, hasPL = false;
+    transactions.forEach((tx) => {
+      const bags = txBags(tx);
+      if (tx.transaction_type === "inbound") inbound += bags;
+      else {
+        outbound += bags;
+        if (tx.price != null && tx.sell_price != null) {
+          profit += (Number(tx.sell_price) - Number(tx.price)) * bags;
+          hasPL = true;
+        }
+      }
+    });
+    const totalBags = stocks.reduce((sum, s) => sum + (s.total_bags ?? s.remaining_bags ?? 0), 0);
+    return { inbound, outbound, totalBags, profit, hasPL };
+  }, [transactions, stocks]);
+
+  /* ──────────────────────────────────────── RENDER ─────────────── */
+  if (loading && transactions.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center h-64 gap-3">
-        <div
-          className="w-10 h-10 rounded-full border-2 border-t-transparent animate-spin"
-          style={{ borderColor: "var(--border)", borderTopColor: "transparent" }}
-        />
-        <span className="text-sm font-medium" style={{ color: "var(--text-muted)" }}>
-          {t("common.loading")}
-        </span>
+      <div className="space-y-3 animate-fade-in">
+        <div className="skeleton h-7" style={{ width: 160 }} />
+        <div className="grid grid-cols-2 gap-2">
+          {[1, 2, 3, 4].map((i) => <div key={i} className="skeleton h-20 rounded-xl" />)}
+        </div>
+        <div className="skeleton h-48 rounded-xl" />
+        <div className="skeleton h-48 rounded-xl" />
       </div>
     );
   }
 
-  return (
-    <div className="space-y-6 animate-fade-in">
+  const activePresetLabel = DATE_PRESETS.find((p) => p.key === activePreset)?.label || "Custom";
 
-      {/* ── Header ──────────────────────────────────── */}
+  return (
+    <div className="space-y-3 animate-fade-in pb-4">
+
+      {/* ══════════════════════════════════════════════════════
+         COMPACT HEADER — title + quick action bar
+         ══════════════════════════════════════════════════════ */}
       <div>
-        <h1
-          className="font-display font-extrabold text-2xl tracking-tight"
-          style={{ color: "var(--text-primary)", letterSpacing: "-0.02em" }}
-        >
-          {t("nav.reports")}
-        </h1>
-        <p className="text-xs mt-0.5 font-medium" style={{ color: "var(--text-muted)" }}>
-          {i18n.language === "ta"
-            ? "பகுப்பாய்வு மற்றும் அறிக்கைகள்"
-            : "Analytics & Reports"}
+        <div className="flex items-baseline justify-between gap-2 mb-1">
+          <h1
+            className="font-display font-extrabold text-[22px] tracking-tight leading-none"
+            style={{ color: "var(--text-primary)", letterSpacing: "-0.02em" }}
+          >
+            {t("nav.reports") || "Reports"}
+          </h1>
+          <button
+            onClick={loadReport}
+            disabled={loading}
+            className="btn-ghost shrink-0"
+            style={{ padding: "5px 7px" }}
+            title="Refresh"
+          >
+            <RefreshCw size={13} className={loading ? "animate-spin" : ""} />
+          </button>
+        </div>
+        <p className="text-[11px] font-medium leading-tight" style={{ color: "var(--text-muted)" }}>
+          {format(parseISO(dateFrom), "dd MMM")} – {format(parseISO(dateTo), "dd MMM yyyy")}
+          <span style={{ color: "var(--text-muted)" }}> · </span>
+          <span className="font-bold" style={{ color: "var(--text-primary)" }}>
+            {transactions.length} {transactions.length === 1 ? "txn" : "txns"}
+          </span>
         </p>
       </div>
 
-      {/* ── Overview Summary Cards ────────────────────── */}
-      <div className="grid grid-cols-3 gap-3">
-        <div
-          className="text-center p-4 rounded-xl"
+      {/* ══════════════════════════════════════════════════════
+         STICKY ACTION BAR — date pill + filter + exports
+         ══════════════════════════════════════════════════════ */}
+      <div
+        className="flex items-center gap-1.5 overflow-x-auto"
+        style={{
+          padding: "2px 0",
+          msOverflowStyle: "none",
+          scrollbarWidth: "none",
+        }}
+      >
+        {/* Date range pill (collapsible) */}
+        <button
+          onClick={() => setShowDateRange((v) => !v)}
+          className="flex items-center gap-1.5 shrink-0"
           style={{
-            backgroundColor: "var(--accent-soft)",
-            border: "1px solid var(--accent)20",
+            padding: "7px 11px",
+            borderRadius: 10,
+            backgroundColor: showDateRange ? "var(--accent)" : "var(--bg-card)",
+            color: showDateRange ? "#fff" : "var(--text-primary)",
+            border: `1.5px solid ${showDateRange ? "var(--accent)" : "var(--border)"}`,
+            fontSize: 12,
+            fontWeight: 700,
+            cursor: "pointer",
+            transition: "all 0.15s",
           }}
         >
-          <div
-            className="w-9 h-9 rounded-xl flex items-center justify-center mx-auto mb-2"
-            style={{ backgroundColor: "var(--accent)15" }}
-          >
-            <Package size={18} style={{ color: "var(--accent)" }} />
-          </div>
-          <div
-            className="text-xl font-extrabold tabular-nums"
-            style={{ color: "var(--accent)", letterSpacing: "-0.02em" }}
-          >
-            {totalBags.toLocaleString()}
-          </div>
-          <div
-            className="text-[10px] font-bold uppercase tracking-wider mt-0.5"
-            style={{ color: "var(--text-muted)" }}
-          >
-            {i18n.language === "ta" ? "மொத்த கையிருப்பு" : "Total Stock"}
-          </div>
-        </div>
+          <Calendar size={13} />
+          <span>{activePresetLabel}</span>
+          {showDateRange ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+        </button>
 
-        <div
-          className="text-center p-4 rounded-xl"
+        {/* Filters */}
+        <button
+          onClick={() => setShowFilters((v) => !v)}
+          className="flex items-center gap-1.5 shrink-0 relative"
           style={{
-            backgroundColor: "rgba(16,185,129,0.06)",
-            border: "1px solid rgba(16,185,129,0.15)",
+            padding: "7px 11px",
+            borderRadius: 10,
+            backgroundColor: showFilters ? "var(--accent)" : "var(--bg-card)",
+            color: showFilters ? "#fff" : "var(--text-primary)",
+            border: `1.5px solid ${activeFilterCount > 0 || showFilters ? "var(--accent)" : "var(--border)"}`,
+            fontSize: 12,
+            fontWeight: 700,
+            cursor: "pointer",
+            transition: "all 0.15s",
           }}
         >
-          <div
-            className="w-9 h-9 rounded-xl flex items-center justify-center mx-auto mb-2"
-            style={{ backgroundColor: "rgba(16,185,129,0.12)" }}
-          >
-            <TrendingUp size={18} style={{ color: "#10b981" }} />
-          </div>
-          <div
-            className="text-xl font-extrabold tabular-nums"
-            style={{ color: "#10b981", letterSpacing: "-0.02em" }}
-          >
-            {totalInbound.toLocaleString()}
-          </div>
-          <div
-            className="text-[10px] font-bold uppercase tracking-wider mt-0.5"
-            style={{ color: "var(--text-muted)" }}
-          >
-            {i18n.language === "ta" ? "மொத்த வரவு" : "Total In"}
-          </div>
-        </div>
+          <Filter size={13} />
+          <span>Filter</span>
+          {activeFilterCount > 0 && (
+            <span
+              style={{
+                minWidth: 16,
+                height: 16,
+                padding: "0 4px",
+                borderRadius: 8,
+                backgroundColor: showFilters ? "rgba(255,255,255,0.25)" : "var(--accent)",
+                color: "#fff",
+                fontSize: 9,
+                fontWeight: 800,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              {activeFilterCount}
+            </span>
+          )}
+        </button>
 
-        <div
-          className="text-center p-4 rounded-xl"
+        {/* Spacer */}
+        <div style={{ flex: 1 }} />
+
+        {/* Export buttons */}
+        <button
+          onClick={() => handleExport("csv")}
+          disabled={exporting || transactions.length === 0}
+          className="flex items-center gap-1 shrink-0"
           style={{
-            backgroundColor: "rgba(239,68,68,0.06)",
-            border: "1px solid rgba(239,68,68,0.15)",
+            padding: "7px 10px",
+            borderRadius: 10,
+            backgroundColor: "var(--bg-card)",
+            color: "var(--text-primary)",
+            border: "1.5px solid var(--border)",
+            fontSize: 11,
+            fontWeight: 700,
+            cursor: transactions.length === 0 ? "not-allowed" : "pointer",
+            opacity: transactions.length === 0 ? 0.5 : 1,
           }}
+          title="Export CSV"
         >
-          <div
-            className="w-9 h-9 rounded-xl flex items-center justify-center mx-auto mb-2"
-            style={{ backgroundColor: "rgba(239,68,68,0.12)" }}
-          >
-            <TrendingDown size={18} style={{ color: "#ef4444" }} />
-          </div>
-          <div
-            className="text-xl font-extrabold tabular-nums"
-            style={{ color: "#ef4444", letterSpacing: "-0.02em" }}
-          >
-            {totalOutbound.toLocaleString()}
-          </div>
-          <div
-            className="text-[10px] font-bold uppercase tracking-wider mt-0.5"
-            style={{ color: "var(--text-muted)" }}
-          >
-            {i18n.language === "ta" ? "மொத்த செலவு" : "Total Out"}
-          </div>
-        </div>
+          <FileText size={12} />
+          CSV
+        </button>
+        <button
+          onClick={() => handleExport("xlsx")}
+          disabled={exporting || transactions.length === 0}
+          className="flex items-center gap-1 shrink-0"
+          style={{
+            padding: "7px 10px",
+            borderRadius: 10,
+            background: "linear-gradient(135deg, var(--accent), var(--accent-hover, #5b21b6))",
+            color: "#fff",
+            border: "1.5px solid var(--accent)",
+            fontSize: 11,
+            fontWeight: 700,
+            cursor: transactions.length === 0 ? "not-allowed" : "pointer",
+            opacity: transactions.length === 0 ? 0.5 : 1,
+            boxShadow: "var(--shadow-sm)",
+          }}
+          title="Export Excel"
+        >
+          <FileSpreadsheet size={12} />
+          XLSX
+        </button>
       </div>
 
-      {/* ── Daily Movement Chart ─────────────────────── */}
-      <div className="card">
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-2.5">
-            <div
-              className="w-8 h-8 rounded-lg flex items-center justify-center"
-              style={{ backgroundColor: "var(--accent-soft)" }}
-            >
-              <BarChart3 size={16} style={{ color: "var(--accent)" }} />
+      {/* ══════════════════════════════════════════════════════
+         DATE RANGE PANEL — only when expanded
+         ══════════════════════════════════════════════════════ */}
+      {showDateRange && (
+        <div
+          className="card animate-scale-in"
+          style={{ padding: 12 }}
+        >
+          {/* Preset chips — horizontally scrollable */}
+          <div
+            className="flex gap-1.5 overflow-x-auto pb-1 mb-3"
+            style={{ msOverflowStyle: "none", scrollbarWidth: "none" }}
+          >
+            {DATE_PRESETS.map((p) => (
+              <button
+                key={p.key}
+                onClick={() => applyPreset(p.key)}
+                className="shrink-0"
+                style={{
+                  padding: "6px 12px",
+                  borderRadius: 999,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  backgroundColor: activePreset === p.key ? "var(--accent)" : "var(--bg-secondary)",
+                  color: activePreset === p.key ? "#fff" : "var(--text-secondary)",
+                  border: `1px solid ${activePreset === p.key ? "var(--accent)" : "var(--border)"}`,
+                  whiteSpace: "nowrap",
+                  transition: "all 0.12s",
+                }}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Custom date inputs — compact */}
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="label" style={{ fontSize: 9, marginBottom: 3 }}>From</label>
+              <input
+                type="date"
+                className="input-field"
+                style={{ fontSize: 12, padding: "6px 8px", height: 34 }}
+                value={dateFrom}
+                max={dateTo}
+                onChange={(e) => { setDateFrom(e.target.value); setActivePreset(""); }}
+              />
             </div>
             <div>
-              <h2
-                className="font-bold text-sm"
-                style={{ color: "var(--text-primary)" }}
-              >
-                {i18n.language === "ta"
-                  ? "தினசரி கையிருப்பு இயக்கம்"
-                  : "Daily Stock Movement"}
-              </h2>
-              <p
-                className="text-[10px] font-medium uppercase tracking-wider"
-                style={{ color: "var(--text-muted)" }}
-              >
-                {i18n.language === "ta" ? "கடந்த 14 நாட்கள்" : "Last 14 Days"}
-              </p>
+              <label className="label" style={{ fontSize: 9, marginBottom: 3 }}>To</label>
+              <input
+                type="date"
+                className="input-field"
+                style={{ fontSize: 12, padding: "6px 8px", height: 34 }}
+                value={dateTo}
+                min={dateFrom}
+                max={fmtDate(new Date())}
+                onChange={(e) => { setDateTo(e.target.value); setActivePreset(""); }}
+              />
             </div>
           </div>
         </div>
+      )}
 
+      {/* ══════════════════════════════════════════════════════
+         FILTERS PANEL
+         ══════════════════════════════════════════════════════ */}
+      {showFilters && (
+        <div className="card animate-scale-in" style={{ padding: 12 }}>
+          <div className="flex items-center justify-between mb-2.5">
+            <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
+              Filters
+            </span>
+            {activeFilterCount > 0 && (
+              <button
+                onClick={clearFilters}
+                className="flex items-center gap-1 text-[11px] font-bold"
+                style={{
+                  color: "var(--danger)", background: "none", border: "none",
+                  cursor: "pointer", padding: 0,
+                }}
+              >
+                <X size={11} /> Clear all
+              </button>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="label" style={{ fontSize: 9, marginBottom: 3 }}>Type</label>
+              <select
+                className="input-field"
+                style={{ fontSize: 12, padding: "6px 8px", height: 34 }}
+                value={filterType}
+                onChange={(e) => setFilterType(e.target.value)}
+              >
+                <option value="">All Types</option>
+                <option value="inbound">Arrival</option>
+                <option value="outbound">Send</option>
+              </select>
+            </div>
+            <div>
+              <label className="label" style={{ fontSize: 9, marginBottom: 3 }}>Brand</label>
+              <select
+                className="input-field"
+                style={{ fontSize: 12, padding: "6px 8px", height: 34 }}
+                value={filterBrand}
+                onChange={(e) => setFilterBrand(e.target.value)}
+              >
+                <option value="">All Brands</option>
+                {brands.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {i18n.language === "ta" && b.name_ta ? b.name_ta : b.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="col-span-2">
+              <label className="label" style={{ fontSize: 9, marginBottom: 3 }}>Warehouse</label>
+              <select
+                className="input-field"
+                style={{ fontSize: 12, padding: "6px 8px", height: 34 }}
+                value={filterWarehouse}
+                onChange={(e) => setFilterWarehouse(e.target.value)}
+              >
+                <option value="">All Warehouses</option>
+                {warehouses.map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {i18n.language === "ta" && w.location_name_ta ? w.location_name_ta : w.location_name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {isAdmin && (
+              <>
+                <div className="col-span-2">
+                  <label className="label flex items-center gap-1" style={{ fontSize: 9, marginBottom: 3 }}>
+                    <User size={9} /> Mill Owner
+                  </label>
+                  <select
+                    className="input-field"
+                    style={{ fontSize: 12, padding: "6px 8px", height: 34 }}
+                    value={filterMillOwner}
+                    onChange={(e) => setFilterMillOwner(e.target.value)}
+                  >
+                    <option value="">All Mill Owners</option>
+                    {millOwners.map((m) => (<option key={m.id} value={m.name}>{m.name}</option>))}
+                  </select>
+                </div>
+                <div className="col-span-2">
+                  <label className="label flex items-center gap-1" style={{ fontSize: 9, marginBottom: 3 }}>
+                    <Truck size={9} /> Vehicle
+                  </label>
+                  <input
+                    type="text"
+                    className="input-field uppercase"
+                    placeholder="TN 01 AB 1234"
+                    value={filterVehicle}
+                    onChange={(e) => setFilterVehicle(e.target.value.toUpperCase())}
+                    style={{
+                      fontSize: 12, padding: "6px 8px", height: 34,
+                      letterSpacing: "0.08em", fontFamily: "ui-monospace, monospace",
+                    }}
+                  />
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ══════════════════════════════════════════════════════
+         SUMMARY GRID — compact 2x2 (or 2x2 + P/L on admin)
+         ══════════════════════════════════════════════════════ */}
+      <div
+        className="grid gap-2"
+        style={{
+          gridTemplateColumns: isAdmin && totals.hasPL ? "repeat(2, 1fr)" : "repeat(3, 1fr)",
+        }}
+      >
+        {/* Total Stock */}
+        <div
+          className="rounded-xl"
+          style={{
+            padding: "12px 10px",
+            backgroundColor: "var(--accent-soft)",
+            border: "1.5px solid var(--accent-muted, var(--accent))",
+            position: "relative",
+            overflow: "hidden",
+          }}
+        >
+          <div className="flex items-center gap-1.5 mb-1.5">
+            <Package size={11} style={{ color: "var(--accent)" }} />
+            <span
+              className="text-[8px] font-extrabold uppercase tracking-wider leading-none"
+              style={{ color: "var(--accent)" }}
+            >
+              {i18n.language === "ta" ? "மொத்தம்" : "Stock"}
+            </span>
+          </div>
+          <div
+            className="font-extrabold tabular-nums leading-none"
+            style={{ color: "var(--accent)", fontSize: 22, letterSpacing: "-0.02em" }}
+          >
+            {totals.totalBags.toLocaleString()}
+          </div>
+          <div className="text-[9px] mt-1" style={{ color: "var(--text-muted)" }}>
+            bags
+          </div>
+        </div>
+
+        {/* Inbound */}
+        <div
+          className="rounded-xl"
+          style={{
+            padding: "12px 10px",
+            backgroundColor: "var(--success-soft)",
+            border: "1.5px solid var(--success)",
+            position: "relative",
+            overflow: "hidden",
+          }}
+        >
+          <div className="flex items-center gap-1.5 mb-1.5">
+            <TrendingUp size={11} style={{ color: "var(--success)" }} />
+            <span
+              className="text-[8px] font-extrabold uppercase tracking-wider leading-none"
+              style={{ color: "var(--success-text, var(--success))" }}
+            >
+              {i18n.language === "ta" ? "வரவு" : "In"}
+            </span>
+          </div>
+          <div
+            className="font-extrabold tabular-nums leading-none"
+            style={{ color: "var(--success-text, var(--success))", fontSize: 22, letterSpacing: "-0.02em" }}
+          >
+            {totals.inbound.toLocaleString()}
+          </div>
+          <div className="text-[9px] mt-1" style={{ color: "var(--text-muted)" }}>
+            bags in
+          </div>
+        </div>
+
+        {/* Outbound */}
+        <div
+          className="rounded-xl"
+          style={{
+            padding: "12px 10px",
+            backgroundColor: "var(--danger-soft)",
+            border: "1.5px solid var(--danger)",
+            position: "relative",
+            overflow: "hidden",
+          }}
+        >
+          <div className="flex items-center gap-1.5 mb-1.5">
+            <TrendingDown size={11} style={{ color: "var(--danger)" }} />
+            <span
+              className="text-[8px] font-extrabold uppercase tracking-wider leading-none"
+              style={{ color: "var(--danger-text, var(--danger))" }}
+            >
+              {i18n.language === "ta" ? "செலவு" : "Out"}
+            </span>
+          </div>
+          <div
+            className="font-extrabold tabular-nums leading-none"
+            style={{ color: "var(--danger-text, var(--danger))", fontSize: 22, letterSpacing: "-0.02em" }}
+          >
+            {totals.outbound.toLocaleString()}
+          </div>
+          <div className="text-[9px] mt-1" style={{ color: "var(--text-muted)" }}>
+            bags out
+          </div>
+        </div>
+
+        {/* Profit/Loss (admin only) */}
+        {isAdmin && totals.hasPL && (
+          <div
+            className="rounded-xl"
+            style={{
+              padding: "12px 10px",
+              backgroundColor: totals.profit > 0 ? "var(--success-soft)"
+                : totals.profit < 0 ? "var(--danger-soft)" : "var(--bg-secondary)",
+              border: `1.5px solid ${totals.profit > 0 ? "var(--success)"
+                : totals.profit < 0 ? "var(--danger)" : "var(--border)"}`,
+            }}
+          >
+            <div className="flex items-center gap-1.5 mb-1.5">
+              <IndianRupee
+                size={11}
+                style={{
+                  color: totals.profit > 0 ? "var(--success)"
+                    : totals.profit < 0 ? "var(--danger)" : "var(--text-primary)",
+                }}
+              />
+              <span
+                className="text-[8px] font-extrabold uppercase tracking-wider leading-none"
+                style={{
+                  color: totals.profit > 0 ? "var(--success-text, var(--success))"
+                    : totals.profit < 0 ? "var(--danger-text, var(--danger))" : "var(--text-primary)",
+                }}
+              >
+                P/L
+              </span>
+            </div>
+            <div
+              className="font-extrabold tabular-nums leading-none"
+              style={{
+                color: totals.profit > 0 ? "var(--success-text, var(--success))"
+                  : totals.profit < 0 ? "var(--danger-text, var(--danger))" : "var(--text-primary)",
+                fontSize: 18,
+                letterSpacing: "-0.02em",
+              }}
+            >
+              {totals.profit >= 0 ? "+" : "−"}₹{Math.abs(totals.profit).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+            </div>
+            <div className="text-[9px] mt-1" style={{ color: "var(--text-muted)" }}>
+              net total
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ══════════════════════════════════════════════════════
+         DAILY MOVEMENT CHART
+         ══════════════════════════════════════════════════════ */}
+      <CollapsibleSection
+        title={i18n.language === "ta" ? "தினசரி இயக்கம்" : "Daily Movement"}
+        subtitle={`${chartData.length} day${chartData.length !== 1 ? "s" : ""}`}
+        icon={BarChart3}
+        iconColor="var(--accent)"
+        iconBg="var(--accent-soft)"
+        defaultOpen={chartData.length > 0}
+      >
         {chartData.length > 0 ? (
           <>
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={chartData} barGap={2}>
-                <CartesianGrid
-                  strokeDasharray="3 3"
-                  stroke="var(--border-light)"
-                />
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={chartData} barGap={2} margin={{ top: 5, right: 5, left: -20, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border-light)" vertical={false} />
                 <XAxis
                   dataKey="day"
-                  tick={{ fontSize: 10, fill: "var(--text-muted)" }}
+                  tick={{ fontSize: 9, fill: "var(--text-muted)" }}
                   axisLine={false}
                   tickLine={false}
+                  interval="preserveStartEnd"
                 />
                 <YAxis
-                  tick={{ fontSize: 10, fill: "var(--text-muted)" }}
+                  tick={{ fontSize: 9, fill: "var(--text-muted)" }}
                   axisLine={false}
                   tickLine={false}
+                  width={30}
                 />
                 <Tooltip
                   contentStyle={{
                     backgroundColor: "var(--bg-card)",
                     border: "1px solid var(--border)",
-                    borderRadius: 12,
-                    fontSize: 12,
+                    borderRadius: 10,
+                    fontSize: 11,
                     boxShadow: "var(--shadow-md)",
+                    padding: "6px 10px",
                   }}
-                />
-                <Legend
-                  wrapperStyle={{ fontSize: 11, paddingTop: 8 }}
-                  iconType="circle"
-                  iconSize={8}
+                  cursor={{ fill: "rgba(0,0,0,0.03)" }}
                 />
                 <Bar
                   dataKey="inbound"
-                  name={i18n.language === "ta" ? "வரவு" : "Inbound"}
-                  fill="#10b981"
-                  radius={[4, 4, 0, 0]}
-                  barSize={14}
+                  name={i18n.language === "ta" ? "வரவு" : "In"}
+                  fill="var(--success)"
+                  radius={[3, 3, 0, 0]}
+                  barSize={10}
                 />
                 <Bar
                   dataKey="outbound"
-                  name={i18n.language === "ta" ? "செலவு" : "Outbound"}
-                  fill="#ef4444"
-                  radius={[4, 4, 0, 0]}
-                  barSize={14}
+                  name={i18n.language === "ta" ? "செலவு" : "Out"}
+                  fill="var(--danger)"
+                  radius={[3, 3, 0, 0]}
+                  barSize={10}
                 />
               </BarChart>
             </ResponsiveContainer>
 
-            {/* Mobile legend */}
             <div
-              className="md:hidden flex items-center justify-center gap-6 mt-3 pt-3"
+              className="flex items-center justify-center gap-5 mt-2 pt-2"
               style={{ borderTop: "1px solid var(--border-light)" }}
             >
-              <div className="flex items-center gap-2">
-                <div
-                  className="w-3 h-3 rounded-full"
-                  style={{ backgroundColor: "#10b981" }}
-                />
-                <span
-                  className="text-xs font-semibold"
-                  style={{ color: "var(--text-muted)" }}
-                >
+              <div className="flex items-center gap-1.5">
+                <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: "var(--success)" }} />
+                <span className="text-[10px] font-bold" style={{ color: "var(--text-muted)" }}>
                   {i18n.language === "ta" ? "வரவு" : "Inbound"}
                 </span>
               </div>
-              <div className="flex items-center gap-2">
-                <div
-                  className="w-3 h-3 rounded-full"
-                  style={{ backgroundColor: "#ef4444" }}
-                />
-                <span
-                  className="text-xs font-semibold"
-                  style={{ color: "var(--text-muted)" }}
-                >
+              <div className="flex items-center gap-1.5">
+                <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: "var(--danger)" }} />
+                <span className="text-[10px] font-bold" style={{ color: "var(--text-muted)" }}>
                   {i18n.language === "ta" ? "செலவு" : "Outbound"}
                 </span>
               </div>
             </div>
           </>
         ) : (
-          <div className="flex flex-col items-center justify-center py-12 gap-2">
-            <div
-              className="w-12 h-12 rounded-full flex items-center justify-center"
-              style={{ backgroundColor: "var(--bg-secondary)" }}
-            >
-              <BarChart3 size={20} style={{ color: "var(--text-muted)" }} />
-            </div>
-            <span
-              className="text-sm font-medium"
-              style={{ color: "var(--text-muted)" }}
-            >
-              {i18n.language === "ta"
-                ? "தரவு இல்லை"
-                : t("common.noData")}
-            </span>
-            <span
-              className="text-xs"
-              style={{ color: "var(--text-muted)" }}
-            >
-              {i18n.language === "ta"
-                ? "பரிவர்த்தனைகள் சேர்க்கப்பட்டவுடன் விளக்கப்படம் தோன்றும்"
-                : "Chart will appear once transactions are recorded"}
-            </span>
-          </div>
-        )}
-      </div>
-
-      {/* ── Stock Breakdown ──────────────────────────── */}
-      <div className="card">
-        <div className="flex items-center gap-2.5 mb-4">
-          <div
-            className="w-8 h-8 rounded-lg flex items-center justify-center"
-            style={{ backgroundColor: "rgba(245,158,11,0.1)" }}
-          >
-            <Package size={16} style={{ color: "#f59e0b" }} />
-          </div>
-          <div>
-            <h2
-              className="font-bold text-sm"
-              style={{ color: "var(--text-primary)" }}
-            >
-              {i18n.language === "ta"
-                ? "பிராண்ட் வாரியான கையிருப்பு"
-                : "Current Stock by Brand"}
-            </h2>
-            <p
-              className="text-[10px] font-medium uppercase tracking-wider"
-              style={{ color: "var(--text-muted)" }}
-            >
-              {i18n.language === "ta" ? "மூட்டைகள் மீதம்" : "Bags remaining"}
+          <div className="empty-state" style={{ padding: "24px 12px" }}>
+            <div className="empty-state-icon"><BarChart3 size={18} /></div>
+            <p className="empty-state-text" style={{ fontSize: 12 }}>
+              {i18n.language === "ta" ? "தரவு இல்லை" : "No data in selected range"}
             </p>
           </div>
-        </div>
-
-        {stockBreakdown.length > 0 ? (
-          <>
-            {/* Desktop chart */}
-            <div className="hidden sm:block">
-              <ResponsiveContainer
-                width="100%"
-                height={Math.max(120, stockBreakdown.length * 45)}
-              >
-                <BarChart data={stockBreakdown} layout="vertical">
-                  <XAxis
-                    type="number"
-                    tick={{ fontSize: 10, fill: "var(--text-muted)" }}
-                    axisLine={false}
-                    tickLine={false}
-                  />
-                  <YAxis
-                    dataKey="name"
-                    type="category"
-                    tick={{ fontSize: 11, fill: "var(--text-muted)" }}
-                    width={100}
-                    axisLine={false}
-                    tickLine={false}
-                  />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: "var(--bg-card)",
-                      border: "1px solid var(--border)",
-                      borderRadius: 12,
-                      fontSize: 12,
-                      boxShadow: "var(--shadow-md)",
-                    }}
-                  />
-                  <Bar
-                    dataKey="bags"
-                    name={i18n.language === "ta" ? "மூட்டை" : "Bags"}
-                    fill="var(--accent)"
-                    radius={[0, 6, 6, 0]}
-                    barSize={18}
-                  />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-
-            {/* Mobile stock list */}
-            <div className="sm:hidden space-y-2">
-              {stockBreakdown
-                .sort((a, b) => b.bags - a.bags)
-                .map((item, i) => {
-                  const maxBags = Math.max(
-                    ...stockBreakdown.map((s) => s.bags)
-                  );
-                  const percentage = (item.bags / maxBags) * 100;
-
-                  return (
-                    <div
-                      key={i}
-                      className="p-3.5 rounded-xl"
-                      style={{
-                        backgroundColor: "var(--bg-secondary)",
-                        border: "1px solid var(--border-light)",
-                      }}
-                    >
-                      <div className="flex items-center justify-between mb-2">
-                        <span
-                          className="text-sm font-bold"
-                          style={{ color: "var(--text-primary)" }}
-                        >
-                          {item.name}
-                        </span>
-                        <span
-                          className="text-base font-extrabold tabular-nums"
-                          style={{ color: "var(--accent)" }}
-                        >
-                          {item.bags.toLocaleString()}
-                          <span
-                            className="text-[10px] font-medium ml-1"
-                            style={{ color: "var(--text-muted)" }}
-                          >
-                            {i18n.language === "ta" ? "மூட்டை" : "bags"}
-                          </span>
-                        </span>
-                      </div>
-                      {/* Progress bar */}
-                      <div
-                        className="w-full h-2 rounded-full overflow-hidden"
-                        style={{ backgroundColor: "var(--border-light)" }}
-                      >
-                        <div
-                          className="h-full rounded-full transition-all duration-500"
-                          style={{
-                            width: `${percentage}%`,
-                            background:
-                              "linear-gradient(90deg, var(--accent), var(--accent-hover))",
-                          }}
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-            </div>
-          </>
-        ) : (
-          <div className="flex flex-col items-center justify-center py-12 gap-2">
-            <div
-              className="w-12 h-12 rounded-full flex items-center justify-center"
-              style={{ backgroundColor: "var(--bg-secondary)" }}
-            >
-              <Package size={20} style={{ color: "var(--text-muted)" }} />
-            </div>
-            <span
-              className="text-sm font-medium"
-              style={{ color: "var(--text-muted)" }}
-            >
-              {i18n.language === "ta"
-                ? "கையிருப்பு தரவு இல்லை"
-                : "No stock data available"}
-            </span>
-            <span
-              className="text-xs"
-              style={{ color: "var(--text-muted)" }}
-            >
-              {i18n.language === "ta"
-                ? "பொருட்கள் சேர்க்கப்பட்டவுடன் தோன்றும்"
-                : "Will appear once stocks are added"}
-            </span>
-          </div>
         )}
-      </div>
+      </CollapsibleSection>
 
-      {/* ── Recent Activity Summary ──────────────────── */}
-      {transactions.length > 0 && (
-        <div className="card">
-          <div className="flex items-center gap-2.5 mb-4">
-            <div
-              className="w-8 h-8 rounded-lg flex items-center justify-center"
-              style={{ backgroundColor: "rgba(139,92,246,0.08)" }}
-            >
-              <ArrowLeftRight size={16} style={{ color: "#8b5cf6" }} />
-            </div>
-            <div>
-              <h2
-                className="font-bold text-sm"
-                style={{ color: "var(--text-primary)" }}
-              >
-                {i18n.language === "ta"
-                  ? "சமீபத்திய செயல்பாடு"
-                  : "Recent Activity"}
-              </h2>
-              <p
-                className="text-[10px] font-medium uppercase tracking-wider"
-                style={{ color: "var(--text-muted)" }}
-              >
-                {i18n.language === "ta"
-                  ? "கடைசி 10 பரிவர்த்தனைகள்"
-                  : "Last 10 transactions"}
-              </p>
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            {transactions.slice(0, 10).map((tx) => {
-              const isInbound = tx.transaction_type === "inbound";
-              const typeColor = isInbound ? "#10b981" : "#ef4444";
-              const typeBg = isInbound
-                ? "rgba(16,185,129,"
-                : "rgba(239,68,68,";
-
+      {/* ══════════════════════════════════════════════════════
+         STOCK BY BRAND
+         ══════════════════════════════════════════════════════ */}
+      <CollapsibleSection
+        title={i18n.language === "ta" ? "பிராண்ட் வாரியான கையிருப்பு" : "Stock by Brand"}
+        subtitle={`${stockBreakdown.length} brand${stockBreakdown.length !== 1 ? "s" : ""}`}
+        icon={Package}
+        iconColor="var(--warning)"
+        iconBg="var(--warning-soft)"
+        defaultOpen={stockBreakdown.length > 0}
+      >
+        {stockBreakdown.length > 0 ? (
+          <div className="space-y-1.5">
+            {stockBreakdown.map((item, i) => {
+              const maxBags = Math.max(...stockBreakdown.map((s) => s.bags));
+              const percentage = (item.bags / maxBags) * 100;
               return (
                 <div
-                  key={tx.id}
-                  className="flex items-center gap-3 p-3 rounded-xl transition-colors"
+                  key={i}
+                  className="rounded-lg"
                   style={{
+                    padding: "8px 10px",
                     backgroundColor: "var(--bg-secondary)",
                     border: "1px solid var(--border-light)",
                   }}
                 >
-                  {/* Type icon */}
-                  <div
-                    className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
-                    style={{ backgroundColor: `${typeBg}0.1)` }}
-                  >
-                    {isInbound ? (
-                      <TrendingUp size={15} style={{ color: typeColor }} />
-                    ) : (
-                      <TrendingDown size={15} style={{ color: typeColor }} />
-                    )}
-                  </div>
-
-                  {/* Info */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <span
-                        className="text-sm font-bold truncate"
-                        style={{ color: "var(--text-primary)" }}
-                      >
-                        {stockName(tx.stock)}
-                      </span>
-                      <span
-                        className="text-[10px] font-bold px-1.5 py-0.5 rounded-full shrink-0"
-                        style={{
-                          backgroundColor: `${typeBg}0.1)`,
-                          color: typeColor,
-                        }}
-                      >
-                        {isInbound
-                          ? i18n.language === "ta"
-                            ? "வரவு"
-                            : "IN"
-                          : i18n.language === "ta"
-                          ? "செலவு"
-                          : "OUT"}
-                      </span>
-                    </div>
-                    <div
-                      className="text-[11px] mt-0.5 truncate"
-                      style={{ color: "var(--text-muted)" }}
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span
+                      className="text-[12px] font-bold truncate flex-1"
+                      style={{ color: "var(--text-primary)" }}
                     >
-                      {format(
-                        new Date(tx.transaction_date),
-                        "dd MMM yyyy, HH:mm"
-                      )}
-                      {(tx.source || tx.destination) &&
-                        ` · ${tx.source || tx.destination}`}
-                    </div>
+                      {item.name}
+                    </span>
+                    <span
+                      className="text-[14px] font-extrabold tabular-nums shrink-0 ml-2"
+                      style={{ color: "var(--accent)", letterSpacing: "-0.02em" }}
+                    >
+                      {item.bags.toLocaleString()}
+                      <span className="text-[9px] font-medium ml-1" style={{ color: "var(--text-muted)" }}>
+                        bags
+                      </span>
+                    </span>
                   </div>
-
-                  {/* Bags */}
-                  <span
-                    className="text-base font-extrabold tabular-nums shrink-0"
-                    style={{ color: typeColor }}
+                  <div
+                    style={{
+                      height: 4,
+                      backgroundColor: "var(--bg-card)",
+                      borderRadius: 999,
+                      overflow: "hidden",
+                    }}
                   >
-                    {tx.quantity_bags}
-                  </span>
+                    <div
+                      style={{
+                        width: `${percentage}%`,
+                        height: "100%",
+                        background: "linear-gradient(90deg, var(--accent), #8b5cf6)",
+                        borderRadius: 999,
+                        transition: "width 0.4s",
+                      }}
+                    />
+                  </div>
                 </div>
               );
             })}
           </div>
-        </div>
-      )}
+        ) : (
+          <div className="empty-state" style={{ padding: "24px 12px" }}>
+            <div className="empty-state-icon"><Package size={18} /></div>
+            <p className="empty-state-text" style={{ fontSize: 12 }}>
+              {i18n.language === "ta" ? "கையிருப்பு இல்லை" : "No stock yet"}
+            </p>
+          </div>
+        )}
+      </CollapsibleSection>
+
+      {/* ══════════════════════════════════════════════════════
+         RECENT TRANSACTIONS
+         ══════════════════════════════════════════════════════ */}
+      <CollapsibleSection
+        title={i18n.language === "ta" ? "பரிவர்த்தனைகள்" : "Transactions"}
+        subtitle={`${transactions.length} record${transactions.length !== 1 ? "s" : ""}`}
+        icon={ArrowLeftRight}
+        iconColor="#8b5cf6"
+        iconBg="rgba(139,92,246,0.1)"
+        defaultOpen={true}
+      >
+        {transactions.length > 0 ? (
+          <>
+            {/* Mobile compact list */}
+            <div className="md:hidden space-y-1.5">
+              {transactions.slice(0, 50).map((tx) => {
+                const isInbound = tx.transaction_type === "inbound";
+                const diff = (tx.price != null && tx.sell_price != null)
+                  ? Number(tx.sell_price) - Number(tx.price) : null;
+                return (
+                  <div
+                    key={tx.id}
+                    className="rounded-lg overflow-hidden"
+                    style={{
+                      backgroundColor: "var(--bg-secondary)",
+                      border: "1px solid var(--border-light)",
+                      borderLeftWidth: 3,
+                      borderLeftColor: isInbound ? "var(--success)" : "var(--danger)",
+                    }}
+                  >
+                    <div className="flex items-center gap-2.5" style={{ padding: "9px 10px" }}>
+                      {/* Icon */}
+                      <div
+                        className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
+                        style={{ backgroundColor: isInbound ? "var(--success-soft)" : "var(--danger-soft)" }}
+                      >
+                        {isInbound
+                          ? <TrendingUp size={13} style={{ color: "var(--success)" }} />
+                          : <TrendingDown size={13} style={{ color: "var(--danger)" }} />}
+                      </div>
+
+                      {/* Main info */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className="text-[12px] font-extrabold truncate"
+                            style={{ color: "var(--text-primary)" }}
+                          >
+                            {stockName(tx)}
+                          </span>
+                          {isAdmin && diff != null && (
+                            <span
+                              className="text-[9px] font-extrabold tabular-nums px-1 rounded"
+                              style={{
+                                color: diff > 0 ? "var(--success)" : diff < 0 ? "var(--danger)" : "var(--text-muted)",
+                                backgroundColor: diff > 0 ? "var(--success-soft)"
+                                  : diff < 0 ? "var(--danger-soft)" : "var(--bg-card)",
+                                padding: "1px 5px",
+                              }}
+                            >
+                              {diff > 0 ? "+" : ""}{diff.toFixed(0)}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          <span
+                            className="text-[10px] font-mono font-bold"
+                            style={{ color: "var(--text-secondary)", letterSpacing: "0.05em" }}
+                          >
+                            {tx.vehicle_number || "—"}
+                          </span>
+                          <span style={{ color: "var(--border)" }}>·</span>
+                          <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+                            {format(new Date(tx.transaction_date), "dd MMM, HH:mm")}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Bags */}
+                      <div className="text-right shrink-0">
+                        <div
+                          className="font-extrabold tabular-nums leading-none"
+                          style={{
+                            color: isInbound ? "var(--success)" : "var(--danger)",
+                            fontSize: 15,
+                            letterSpacing: "-0.02em",
+                          }}
+                        >
+                          {isInbound ? "+" : "−"}{txBags(tx)}
+                        </div>
+                        <div className="text-[8px] mt-0.5" style={{ color: "var(--text-muted)" }}>
+                          {txKg(tx).toFixed(0)} kg
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+              {transactions.length > 50 && (
+                <p
+                  className="text-center text-[10px] font-medium pt-2"
+                  style={{ color: "var(--text-muted)" }}
+                >
+                  Showing 50 of {transactions.length} · Export to see all
+                </p>
+              )}
+            </div>
+
+            {/* Desktop table */}
+            <div className="hidden md:block table-container">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Type</th>
+                    <th>Vehicle / Driver</th>
+                    <th>Brand</th>
+                    <th className="text-right">Bags</th>
+                    <th className="text-right">KG</th>
+                    {isAdmin && <th className="text-right">Buy</th>}
+                    {isAdmin && <th className="text-right">Sell</th>}
+                    {isAdmin && <th className="text-right">P/L</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {transactions.slice(0, 100).map((tx) => {
+                    const isInbound = tx.transaction_type === "inbound";
+                    const diff = (tx.price != null && tx.sell_price != null)
+                      ? Number(tx.sell_price) - Number(tx.price) : null;
+                    return (
+                      <tr key={tx.id}>
+                        <td className="text-xs tabular-nums">
+                          {format(new Date(tx.transaction_date), "dd MMM, HH:mm")}
+                        </td>
+                        <td>
+                          <span className={`badge ${isInbound ? "badge-success" : "badge-danger"}`}>
+                            {isInbound ? "Arrival" : "Send"}
+                          </span>
+                        </td>
+                        <td>
+                          <div className="text-xs font-bold">{tx.vehicle_number || "—"}</div>
+                          <div className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+                            {tx.driver_name || "—"}
+                          </div>
+                        </td>
+                        <td className="font-medium">{stockName(tx)}</td>
+                        <td className="text-right font-bold tabular-nums">{txBags(tx)}</td>
+                        <td className="text-right tabular-nums text-xs">{txKg(tx).toFixed(1)}</td>
+                        {isAdmin && (
+                          <td className="text-right tabular-nums text-xs">
+                            {tx.price != null ? `₹${tx.price}` : "—"}
+                          </td>
+                        )}
+                        {isAdmin && (
+                          <td className="text-right tabular-nums text-xs">
+                            {tx.sell_price != null ? `₹${tx.sell_price}` : "—"}
+                          </td>
+                        )}
+                        {isAdmin && (
+                          <td className="text-right">
+                            {diff != null ? (
+                              <span
+                                className="font-bold tabular-nums"
+                                style={{
+                                  color: diff > 0 ? "var(--success)"
+                                    : diff < 0 ? "var(--danger)" : "var(--text-primary)",
+                                }}
+                              >
+                                {diff > 0 ? "+" : ""}{diff.toFixed(2)}
+                              </span>
+                            ) : (
+                              <span style={{ color: "var(--text-muted)" }}>—</span>
+                            )}
+                          </td>
+                        )}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {transactions.length > 100 && (
+                <p
+                  className="text-center text-[11px] font-medium pt-3"
+                  style={{ color: "var(--text-muted)" }}
+                >
+                  Showing 100 of {transactions.length} · Export to see all
+                </p>
+              )}
+            </div>
+          </>
+        ) : (
+          <div className="empty-state" style={{ padding: "24px 12px" }}>
+            <div className="empty-state-icon"><ArrowLeftRight size={18} /></div>
+            <p className="empty-state-title" style={{ fontSize: 13 }}>No transactions</p>
+            <p className="empty-state-text" style={{ fontSize: 11 }}>
+              No records match your filters
+            </p>
+          </div>
+        )}
+      </CollapsibleSection>
     </div>
   );
 }
