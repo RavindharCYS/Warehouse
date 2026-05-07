@@ -101,7 +101,7 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onBrand
     // buying_price is now per-item, not global
   });
 
-  const blankRow   = () => ({ weight: "", quantity: "" });
+  const blankRow   = () => ({ weight: "", quantity: "", buying_price: "" });
   const blankGroup = () => ({ warehouse_id: "", rows: [blankRow()] });
   const blankItem  = () => ({ brand_id: "", rice_type_id: "", bag_size: 25, buying_price: "", warehouseGroups: [blankGroup()] });
 
@@ -165,6 +165,7 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onBrand
   const flatEntries = (item) =>
     item.warehouseGroups.flatMap(g => g.rows.map(r => ({
       weight: Number(r.weight) || 0, quantity: Number(r.quantity) || 0, warehouse_id: g.warehouse_id,
+      buying_price: r.buying_price !== "" && r.buying_price != null ? Number(r.buying_price) : null,
     })));
 
   const itemTotals = useMemo(() => items.map(it => {
@@ -223,11 +224,18 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onBrand
           const validEntries = flatEntries(it)
             .filter(e => e.weight > 0 && e.quantity > 0 && e.warehouse_id)
             .map(e => ({ weight: e.weight, quantity: e.quantity, warehouse_id: Number(e.warehouse_id) }));
-          const weightAgg = new Map(), splitAgg = new Map();
+          const weightAgg = new Map(), splitAgg = new Map(), weightPriceAgg = new Map();
           for (const en of validEntries) {
             weightAgg.set(en.weight, (weightAgg.get(en.weight) || 0) + en.quantity);
             splitAgg.set(en.warehouse_id, (splitAgg.get(en.warehouse_id) || 0) + en.quantity);
+            // Store buying_price per weight (last one wins if same weight appears in multiple groups)
+            if (isAdmin && en.buying_price != null) weightPriceAgg.set(en.weight, en.buying_price);
           }
+          // Derive item-level buying_price: use first row's price as fallback for legacy compat
+          const allRowPrices = flatEntries(it)
+            .map(r => r.buying_price)
+            .filter(p => p != null && p > 0);
+          const itemBuyingPrice = allRowPrices.length === 1 ? allRowPrices[0] : null; // only set global if uniform single price
           return {
             brand_id: Number(it.brand_id),
             rice_type_id: it.rice_type_id ? Number(it.rice_type_id) : null,
@@ -237,9 +245,12 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onBrand
             total_units: itemTotals[i].totalUnits,
             total_weight_kg: itemTotals[i].totalKg,
             entries: validEntries,
-            weights: Array.from(weightAgg.entries()).map(([weight, quantity]) => ({ weight, quantity })),
+            weights: Array.from(weightAgg.entries()).map(([weight, quantity]) => ({
+              weight, quantity,
+              ...(isAdmin && weightPriceAgg.has(weight) ? { buying_price: weightPriceAgg.get(weight) } : {}),
+            })),
             warehouse_splits: Array.from(splitAgg.entries()).map(([warehouse_id, bags]) => ({ warehouse_id, bags })),
-            ...(isAdmin && it.buying_price !== "" ? { buying_price: Number(it.buying_price) } : {}),
+            ...(isAdmin && itemBuyingPrice != null ? { buying_price: itemBuyingPrice } : {}),
           };
         }),
         ...(isAdmin ? {
@@ -335,12 +346,14 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onBrand
             <div>
               <label className="label text-[10px]">Rent (Global)</label>
               <input type="number" step="0.01" className="input-field" value={header.rent}
-                onChange={e => setHeader(h => ({ ...h, rent: e.target.value }))} placeholder="0.00" />
+                onWheel={e => e.target.blur()}
+                        onChange={e => setHeader(h => ({ ...h, rent: e.target.value }))} placeholder="0.00" />
             </div>
             <div>
               <label className="label text-[10px]">Hidden Charges (Global)</label>
               <input type="number" step="0.01" className="input-field" value={header.hidden_charges}
-                onChange={e => setHeader(h => ({ ...h, hidden_charges: e.target.value }))} placeholder="0.00" />
+                onWheel={e => e.target.blur()}
+                        onChange={e => setHeader(h => ({ ...h, hidden_charges: e.target.value }))} placeholder="0.00" />
             </div>
           </div>
           {totalGlobalCharges !== null && (
@@ -424,8 +437,8 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onBrand
                     )}
                   </div>
 
-                  {/* Rice Type + Bag Size — side by side on mobile */}
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                  {/* Rice Type only (Bag Size removed — not needed) */}
+                  <div>
                     <div>
                       <label className="label">Rice Type</label>
                       {!showNewRice[idx] ? (
@@ -464,36 +477,9 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onBrand
                         </div>
                       )}
                     </div>
-                    <div>
-                      <label className="label">Bag Size</label>
-                      <select className="input-field" value={it.bag_size}
-                        onChange={e => updateItem(idx, { bag_size: e.target.value })}>
-                        {BAG_SIZES.map(b => <option key={b} value={b}>{b} KG</option>)}
-                      </select>
-                    </div>
                   </div>
 
-                  {/* ── Per-Item Buying Price (Admin only) ── */}
-                  {isAdmin && (
-                    <div className="rounded-xl p-3 space-y-1"
-                      style={{ backgroundColor: "rgba(99,102,241,0.04)", border: "1px dashed rgba(99,102,241,0.3)" }}>
-                      <label className="label text-[10px] flex items-center gap-1.5">
-                        <IndianRupee size={10} style={{ color: "#6366f1" }} />
-                        <span style={{ color: "#6366f1" }}>Buying Price / Bag (for this item)</span>
-                      </label>
-                      <input type="number" step="0.01" className="input-field"
-                        value={it.buying_price}
-                        onChange={e => updateItem(idx, { buying_price: e.target.value })}
-                        placeholder="e.g. 1500.00" />
-                      {it.buying_price !== "" && Number(it.buying_price) > 0 && (
-                        <p className="text-[10px] font-semibold" style={{ color: "#6366f1" }}>
-                          ₹{Number(it.buying_price).toFixed(2)}/bag · Est. total: ₹{(Number(it.buying_price) * (itemTotals[idx]?.totalBagUnits || 0)).toFixed(2)}
-                        </p>
-                      )}
-                    </div>
-                  )}
-
-                  {/* ── Warehouse Groups ── */}
+               {/* ── Warehouse Groups ── */}
                   <div>
                     <SectionLabel>{i18n.language === "ta" ? "கிடங்கு பகிர்வு" : "Entries → Warehouse"}</SectionLabel>
                     <div className="space-y-2.5">
@@ -543,13 +529,18 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onBrand
                             {/* Weight × Qty rows */}
                             <div className="px-3 pt-3 pb-3 space-y-2">
                               {/* Column headers */}
-                              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8 }}>
+                              <div style={{ display: "grid", gridTemplateColumns: isAdmin ? "1fr 1fr 1fr auto" : "1fr 1fr auto", gap: 8 }}>
                                 <label className="text-[9px] font-bold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
                                   Weight (KG)
                                 </label>
                                 <label className="text-[9px] font-bold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
                                   Quantity
                                 </label>
+                                {isAdmin && (
+                                  <label className="text-[9px] font-bold uppercase tracking-wider" style={{ color: "#6366f1" }}>
+                                    ₹ / Unit
+                                  </label>
+                                )}
                                 <div style={{ width: 32 }} />
                               </div>
 
@@ -564,13 +555,22 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onBrand
 
                                 return (
                                   <div key={rIdx}>
-                                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8, alignItems: "center" }}>
+                                    <div style={{ display: "grid", gridTemplateColumns: isAdmin ? "1fr 1fr 1fr auto" : "1fr 1fr auto", gap: 8, alignItems: "center" }}>
                                       <input type="number" min="0" step="0.5" className="input-field"
                                         placeholder="25" value={row.weight} style={{ minWidth: 0 }}
+                                        onWheel={e => e.target.blur()}
                                         onChange={e => updateRow(idx, gIdx, rIdx, { weight: e.target.value })} />
                                       <input type="number" min="0" className="input-field"
                                         placeholder="5" value={row.quantity} style={{ minWidth: 0 }}
+                                        onWheel={e => e.target.blur()}
                                         onChange={e => updateRow(idx, gIdx, rIdx, { quantity: e.target.value })} />
+                                      {isAdmin && (
+                                        <input type="number" min="0" step="0.01" className="input-field"
+                                          placeholder="₹ price" value={row.buying_price || ""}
+                                          style={{ minWidth: 0 }}
+                                          onWheel={e => e.target.blur()}
+                                          onChange={e => updateRow(idx, gIdx, rIdx, { buying_price: e.target.value })} />
+                                      )}
                                       <button type="button"
                                         onClick={() => removeRow(idx, gIdx, rIdx)}
                                         disabled={grp.rows.length <= 1}
@@ -585,12 +585,18 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onBrand
                                       </button>
                                     </div>
                                     {wt > 0 && qty > 0 && (
-                                      <div className="flex items-center gap-2 mt-1.5 pl-1">
+                                      <div className="flex items-center gap-2 mt-1.5 pl-1 flex-wrap">
                                         <span className="text-[10px] font-bold px-2 py-0.5 rounded-md flex items-center gap-1"
                                           style={{ color: kindColor, backgroundColor: kindBg }}>
                                           {isBag ? <Box size={9} /> : isPiece ? <Layers size={9} /> : null}
                                           {kindLabel}
                                         </span>
+                                        {isAdmin && row.buying_price && Number(row.buying_price) > 0 && (
+                                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-md"
+                                            style={{ color: "#6366f1", backgroundColor: "rgba(99,102,241,0.08)" }}>
+                                            ₹{Number(row.buying_price).toFixed(2)}/unit · total ₹{(Number(row.buying_price) * qty).toFixed(2)}
+                                          </span>
+                                        )}
                                         <span className="text-[10px] tabular-nums font-medium" style={{ color: "var(--text-muted)" }}>
                                           = {(wt * qty).toFixed(1)} KG
                                         </span>
@@ -922,7 +928,8 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
             <div>
               <label className="label flex items-center gap-1.5"><IndianRupee size={11} /> Sell Price</label>
               <input type="number" step="0.01" className="input-field" value={header.sell_price}
-                onChange={e => setHeader(h => ({ ...h, sell_price: e.target.value }))} placeholder="0.00" />
+                onWheel={e => e.target.blur()}
+                        onChange={e => setHeader(h => ({ ...h, sell_price: e.target.value }))} placeholder="0.00" />
             </div>
           </div>
           {/* Profit indicator for first item */}
@@ -1072,7 +1079,8 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
                         )}
                       </label>
                       <input type="number" min="1" max={maxUnits || undefined} className="input-field"
-                        value={it.bags} onChange={e => updateItem(idx, { bags: e.target.value })}
+                        value={it.bags} onWheel={e => e.target.blur()}
+                        onChange={e => updateItem(idx, { bags: e.target.value })}
                         placeholder={`1–${maxUnits}`} />
                       {it.bags && Number(it.bags) > maxUnits && maxUnits > 0 && (
                         <p className="text-[10px] mt-1 font-medium" style={{ color: "var(--danger)" }}>
@@ -1097,6 +1105,7 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
                       </label>
                       <input type="number" step="0.01" className="input-field"
                         value={it.selling_price}
+                        onWheel={e => e.target.blur()}
                         onChange={e => updateItem(idx, { selling_price: e.target.value })}
                         placeholder="e.g. 1600.00" />
                       {it.selling_price !== "" && Number(it.selling_price) > 0 && (() => {
@@ -1309,11 +1318,13 @@ function PendingAdminModal({ tx, onClose, onSave, i18n }) {
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             <div>
               <label className="label text-[10px]">Rent (Global)</label>
-              <input type="number" step="0.01" className="input-field" value={rent} onChange={e => setRent(e.target.value)} placeholder="0" />
+              <input type="number" step="0.01" className="input-field" value={rent} onWheel={e => e.target.blur()}
+                        onChange={e => setRent(e.target.value)} placeholder="0" />
             </div>
             <div>
               <label className="label text-[10px]">Hidden Charges (Global)</label>
-              <input type="number" step="0.01" className="input-field" value={hiddenCharges} onChange={e => setHiddenCharges(e.target.value)} placeholder="0" />
+              <input type="number" step="0.01" className="input-field" value={hiddenCharges} onWheel={e => e.target.blur()}
+                        onChange={e => setHiddenCharges(e.target.value)} placeholder="0" />
             </div>
           </div>
           {/* Per-item buying prices */}
@@ -1332,7 +1343,8 @@ function PendingAdminModal({ tx, onClose, onSave, i18n }) {
                   </p>
                   <input type="number" step="0.01" className="input-field"
                     defaultValue={it.buying_price || ""}
-                    onChange={e => {
+                    onWheel={e => e.target.blur()}
+                        onChange={e => {
                       const val = e.target.value;
                       setItemBuyingPrices(prev => ({ ...prev, [it.id]: val }));
                     }}
@@ -1373,7 +1385,8 @@ function PendingAdminModal({ tx, onClose, onSave, i18n }) {
                     </p>
                     <input type="number" step="0.01" className="input-field"
                       value={spVal}
-                      onChange={e => setItemSellingPrices(prev => ({ ...prev, [it.id]: e.target.value }))}
+                      onWheel={e => e.target.blur()}
+                        onChange={e => setItemSellingPrices(prev => ({ ...prev, [it.id]: e.target.value }))}
                       placeholder="Selling price/bag e.g. 1600" />
                     {spVal !== "" && Number(spVal) > 0 && (
                       <div className="flex items-center gap-2 flex-wrap">
@@ -1395,7 +1408,8 @@ function PendingAdminModal({ tx, onClose, onSave, i18n }) {
           ) : (
             <div>
               <label className="label flex items-center gap-1.5"><IndianRupee size={11} /> Sell Price/Bag</label>
-              <input type="number" step="0.01" className="input-field" value={sellPrice} onChange={e => setSellPrice(e.target.value)} placeholder="1600" />
+              <input type="number" step="0.01" className="input-field" value={sellPrice} onWheel={e => e.target.blur()}
+                        onChange={e => setSellPrice(e.target.value)} placeholder="1600" />
               {diff !== null && (
                 <p className="text-sm font-bold mt-1.5" style={{ color: diff > 0 ? "#10b981" : diff < 0 ? "#ef4444" : "var(--text-primary)" }}>
                   {diff > 0 ? `+${diff.toFixed(2)}` : diff.toFixed(2)} per bag
@@ -1626,15 +1640,39 @@ function TransactionAccordion({ tx, isOpen, onToggle, isAdmin,
                       <div className="px-3 py-1.5" style={{ backgroundColor: "rgba(99,102,241,0.06)" }}>
                         <span className="text-[10px] font-bold uppercase tracking-wider" style={{ color: "#6366f1" }}>Buying Price per Item</span>
                       </div>
-                      {txItems.map((it, i2) => it.buying_price != null && (
-                        <div key={i2} className="flex items-center justify-between px-3 py-2" style={{ borderTop: i2 === 0 ? "none" : "1px solid var(--border-light)" }}>
-                          <span className="text-xs font-medium" style={{ color: "var(--text-secondary)" }}>
-                            {it.brand?.name || brandName(it.brand_id)}
-                            {it.rice_type_ref?.name && <span className="ml-1 opacity-60">· {it.rice_type_ref.name}</span>}
-                          </span>
-                          <span className="text-sm font-bold tabular-nums" style={{ color: "#6366f1" }}>₹{it.buying_price.toFixed(2)}/bag</span>
-                        </div>
-                      ))}
+                      {txItems.map((it, i2) => {
+                        // Show per-weight row prices if available, else item-level price
+                        const hasWeightPrices = it.weights?.some(w => w.buying_price != null);
+                        if (!hasWeightPrices && it.buying_price == null) return null;
+                        return (
+                          <div key={i2} style={{ borderTop: i2 === 0 ? "none" : "1px solid var(--border-light)" }}>
+                            <div className="flex items-center justify-between px-3 py-2">
+                              <span className="text-xs font-semibold" style={{ color: "var(--text-secondary)" }}>
+                                {it.brand?.name || brandName(it.brand_id)}
+                                {it.rice_type_ref?.name && <span className="ml-1 opacity-60">· {it.rice_type_ref.name}</span>}
+                              </span>
+                              {!hasWeightPrices && it.buying_price != null && (
+                                <span className="text-sm font-bold tabular-nums" style={{ color: "#6366f1" }}>₹{it.buying_price.toFixed(2)}/unit</span>
+                              )}
+                            </div>
+                            {hasWeightPrices && (
+                              <div className="px-3 pb-2 space-y-1">
+                                {it.weights.filter(w => w.buying_price != null).map((w, wi) => (
+                                  <div key={wi} className="flex items-center justify-between py-1 px-2 rounded-lg"
+                                    style={{ backgroundColor: "rgba(99,102,241,0.04)" }}>
+                                    <span className="text-[11px] font-medium" style={{ color: "var(--text-muted)" }}>
+                                      {w.weight_kg}KG × {w.quantity}
+                                    </span>
+                                    <span className="text-xs font-bold tabular-nums" style={{ color: "#6366f1" }}>
+                                      ₹{w.buying_price.toFixed(2)}/unit · ₹{(w.buying_price * w.quantity).toFixed(2)} total
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                   {/* Legacy global price field */}

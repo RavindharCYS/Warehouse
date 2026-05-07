@@ -346,6 +346,7 @@ class WeightRow(BaseModel):
     """One weight row inside an arrival item."""
     weight: float
     quantity: int
+    buying_price: Optional[float] = None  # per-weight buying price (admin only)
 
     @field_validator("weight")
     @classmethod
@@ -518,6 +519,7 @@ class TransactionItemWeightOut(BaseModel):
     id: int
     weight_kg: float
     quantity: int
+    buying_price: Optional[float] = None
 
 
 class TransactionItemSplitOut(BaseModel):

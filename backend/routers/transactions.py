@@ -489,17 +489,27 @@ def create_arrival(
             total_weight_kg=total_kg,
         )
         # Per-item buying price (admin only)
-        if is_admin and item.buying_price is not None:
-            ti.buying_price = item.buying_price
+        # Use explicit item.buying_price if provided; otherwise derive from weight rows
+        if is_admin:
+            if item.buying_price is not None:
+                ti.buying_price = item.buying_price
+            else:
+                # Collect per-weight prices; if all same → set as item-level price
+                row_prices = [w.buying_price for w in item.weights if w.buying_price is not None]
+                if row_prices:
+                    unique = set(row_prices)
+                    if len(unique) == 1:
+                        ti.buying_price = row_prices[0]
         db.add(ti)
         db.flush()
 
-        # Save weight rows verbatim
-        for w in weights_data:
+        # Save weight rows verbatim (with per-weight buying_price if provided)
+        for w in item.weights:
             db.add(TransactionItemWeight(
                 item_id=ti.id,
-                weight_kg=float(w["weight"]),
-                quantity=int(w["quantity"]),
+                weight_kg=float(w.weight),
+                quantity=int(w.quantity),
+                buying_price=float(w.buying_price) if (is_admin and w.buying_price is not None) else None,
             ))
 
         # Save splits + apply to stock

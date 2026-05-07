@@ -44,6 +44,12 @@ with engine.connect() as conn:
     else:
         logger.info("selling_price already exists")
 
+    if not column_exists(conn, "transaction_item_weights", "buying_price"):
+        conn.execute(text("ALTER TABLE transaction_item_weights ADD COLUMN buying_price FLOAT"))
+        logger.info("Added buying_price to transaction_item_weights")
+    else:
+        logger.info("transaction_item_weights.buying_price already exists")
+
     conn.commit()
 
 logger.info("Migration complete.")
