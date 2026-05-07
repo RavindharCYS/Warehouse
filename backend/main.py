@@ -325,3 +325,26 @@ def health():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+
+    # Auto-migrate on startup
+from sqlalchemy import text, inspect
+
+def run_migrations():
+    from database import engine
+    migrations = [
+        ("transaction_items",        "buying_price",  "ALTER TABLE transaction_items ADD COLUMN buying_price FLOAT"),
+        ("transaction_items",        "selling_price", "ALTER TABLE transaction_items ADD COLUMN selling_price FLOAT"),
+        ("transaction_item_weights", "buying_price",  "ALTER TABLE transaction_item_weights ADD COLUMN buying_price FLOAT"),
+        ("transaction_item_weights", "selling_price", "ALTER TABLE transaction_item_weights ADD COLUMN selling_price FLOAT"),
+    ]
+    with engine.connect() as conn:
+        for table, col, sql in migrations:
+            try:
+                existing = [c["name"] for c in inspect(engine).get_columns(table)]
+                if col not in existing:
+                    conn.execute(text(sql))
+                    conn.commit()
+            except Exception:
+                pass  # Already exists or table not yet created
+
+run_migrations()

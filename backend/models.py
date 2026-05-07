@@ -362,7 +362,8 @@ class TransactionItemWeight(Base):
     item_id = Column(Integer, ForeignKey("transaction_items.id"), nullable=False)
     weight_kg = Column(Float, nullable=False)        # individual unit weight (5, 10, 25, 26 ...)
     quantity = Column(Integer, nullable=False)       # count of that weight unit
-    buying_price = Column(Float, nullable=True)     # buying price per unit for this weight row
+    buying_price  = Column(Float, nullable=True)    # buying price per unit for this weight row
+    selling_price = Column(Float, nullable=True)    # selling price per unit for this weight row (send)
 
     item = relationship("TransactionItem", back_populates="weights")
 

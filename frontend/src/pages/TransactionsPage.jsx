@@ -751,7 +751,7 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
 
   const [header, setHeader] = useState({
     vehicle_number: "", driver_name: "", driver_number: "",
-    destination: "", to_whom: "", location: "", sell_price: "",
+    destination: "", to_whom: "", location: "",
     transaction_date: format(new Date(), "yyyy-MM-dd'T'HH:mm"),
     notes: "",
   });
@@ -823,8 +823,10 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
         return toast.error(`Item ${i + 1}: Fill all fields`);
       if (Number(it.bags) <= 0) return toast.error(`Item ${i + 1}: Quantity must be > 0`);
       if (Number(it.bags) > maxUnitsForItem(it)) return toast.error(`Item ${i + 1}: Exceeds available stock`);
+      // Non-admin: selling price not required at submission — will go to admin pending
+      // Admin: selling price required per item
       if (isAdmin && (!it.selling_price || Number(it.selling_price) <= 0))
-        return toast.error(`Item ${i + 1}: Selling price per bag is required`);
+        return toast.error(`Item ${i + 1}: Enter selling price per bag`);
     }
 
     const cumulative = new Map();
@@ -855,7 +857,6 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
         })),
         ...(isAdmin ? {
           location: header.location || null,
-          sell_price: items.length === 1 && items[0].selling_price !== "" ? Number(items[0].selling_price) : (header.sell_price !== "" ? Number(header.sell_price) : null),
         } : {}),
       };
       await onSubmit(payload);
@@ -919,35 +920,11 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
             <input className="input-field" value={header.to_whom}
               onChange={e => setHeader(h => ({ ...h, to_whom: e.target.value }))} placeholder="Buyer / Recipient..." />
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-            <div>
-              <label className="label flex items-center gap-1.5"><MapPin size={11} /> Location</label>
-              <input className="input-field" value={header.location}
-                onChange={e => setHeader(h => ({ ...h, location: e.target.value }))} placeholder="Location..." />
-            </div>
-            <div>
-              <label className="label flex items-center gap-1.5"><IndianRupee size={11} /> Sell Price</label>
-              <input type="number" step="0.01" className="input-field" value={header.sell_price}
-                onWheel={e => e.target.blur()}
-                        onChange={e => setHeader(h => ({ ...h, sell_price: e.target.value }))} placeholder="0.00" />
-            </div>
+          <div>
+            <label className="label flex items-center gap-1.5"><MapPin size={11} /> Location</label>
+            <input className="input-field" value={header.location}
+              onChange={e => setHeader(h => ({ ...h, location: e.target.value }))} placeholder="Location..." />
           </div>
-          {/* Profit indicator for first item */}
-          {items[0] && buyPriceForItem(items[0]) != null && header.sell_price !== "" && (() => {
-            const diff = Number(header.sell_price) - buyPriceForItem(items[0]);
-            const col = diff > 0 ? "var(--success)" : diff < 0 ? "var(--danger)" : "var(--text-muted)";
-            const bg  = diff > 0 ? "var(--success-soft)" : diff < 0 ? "var(--danger-soft)" : "var(--bg-secondary)";
-            return (
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-extrabold tabular-nums" style={{ color: "var(--text-primary)" }}>
-                  ₹{Number(header.sell_price).toFixed(2)}
-                </span>
-                <span className="text-sm font-bold tabular-nums rounded-lg px-2 py-0.5" style={{ color: col, backgroundColor: bg }}>
-                  ({diff > 0 ? "+" : ""}{diff.toFixed(2)})
-                </span>
-              </div>
-            );
-          })()}
         </div>
       )}
 
@@ -1236,54 +1213,141 @@ function TransactionForm({ onSubmit, onClose, brands, riceTypes, warehouses,
    ═══════════════════════════════════════════════════════ */
 function PendingAdminModal({ tx, onClose, onSave, i18n }) {
   const isArrival = tx.transaction_type === "inbound";
+
+  // Arrival state
   const [millOwnerName, setMillOwnerName] = useState(tx.mill_owner_name || "");
   const [commissionPartner, setCommissionPartner] = useState(tx.commission_partner || "");
-  const [price, setPrice] = useState(tx.price || "");
-  const [rent, setRent] = useState(tx.rent || "");
-  const [hiddenCharges, setHiddenCharges] = useState(tx.hidden_charges || "");
-  const [sellPrice, setSellPrice] = useState(tx.sell_price || "");
-  const [location, setLocation] = useState(tx.location || "");
-  const [toWhom, setToWhom] = useState(tx.commission_partner || "");
-  const [loading, setLoading] = useState(false);
-  const [itemBuyingPrices, setItemBuyingPrices] = useState({});
-  const [itemSellingPrices, setItemSellingPrices] = useState({});
+  const [rent, setRent] = useState(tx.rent ?? "");
+  const [hiddenCharges, setHiddenCharges] = useState(tx.hidden_charges ?? "");
 
-  const diff = sellPrice && price ? parseFloat(sellPrice) - parseFloat(price) : null;
+  // Per-weight-row buying prices: key = `${item_id}__${weight_kg}`
+  // Pre-fill from existing saved weight prices
+  const initWeightPrices = () => {
+    const out = {};
+    (tx.items || []).forEach(it => {
+      (it.weights || []).forEach(w => {
+        if (w.buying_price != null)
+          out[`${it.id}__${w.weight_kg}`] = String(w.buying_price);
+      });
+    });
+    return out;
+  };
+  const [weightBuyingPrices, setWeightBuyingPrices] = useState(initWeightPrices);
+
+  // Send state
+  const [toWhom, setToWhom] = useState(tx.commission_partner || "");
+  const [location, setLocation] = useState(tx.location || "");
+
+  // Per-weight-row selling prices for send: key = `${item_id}__${weight_kg}`
+  const initSellPrices = () => {
+    const out = {};
+    (tx.items || []).forEach(it => {
+      (it.weights || []).forEach(w => {
+        if (w.selling_price != null)
+          out[`${it.id}__${w.weight_kg}`] = String(w.selling_price);
+        else if (it.selling_price != null)
+          out[`${it.id}__${w.weight_kg}`] = String(it.selling_price);
+      });
+    });
+    return out;
+  };
+  const [weightSellingPrices, setWeightSellingPrices] = useState(initSellPrices);
+
+  const [loading, setLoading] = useState(false);
+
+  // Build weight rows for display — flatten items × weights
+  const allWeightRows = useMemo(() => {
+    const rows = [];
+    (tx.items || []).forEach(it => {
+      const brandLabel = it.brand?.name || `Brand #${it.brand_id}`;
+      const typeLabel  = it.rice_type_ref?.name || null;
+      const weights = it.weights?.length > 0
+        ? it.weights
+        : [{ weight_kg: it.bag_size_kg, quantity: it.total_bags, buying_price: it.buying_price, selling_price: it.selling_price }];
+      weights.forEach(w => {
+        const isPiece = w.weight_kg < 25;
+        rows.push({
+          itemId: it.id,
+          brandLabel,
+          typeLabel,
+          weight_kg: w.weight_kg,
+          quantity: w.quantity,
+          isPiece,
+          unitLabel: isPiece ? "piece" : "bag",
+          existingBuyPrice: w.buying_price ?? it.buying_price ?? null,
+          existingSellPrice: w.selling_price ?? it.selling_price ?? null,
+          key: `${it.id}__${w.weight_kg}`,
+        });
+      });
+    });
+    return rows;
+  }, [tx]);
 
   const handleSave = async () => {
     const data = {};
+
     if (isArrival) {
       if (millOwnerName.trim())     data.mill_owner_name = millOwnerName.trim();
       if (commissionPartner.trim()) data.commission_partner = commissionPartner.trim();
-      if (rent)                     data.rent = parseFloat(rent);
-      if (hiddenCharges)            data.hidden_charges = parseFloat(hiddenCharges);
-      // Per-item buying prices
-      const itemPrices = {};
-      Object.entries(itemBuyingPrices).forEach(([itemId, val]) => {
-        if (val && parseFloat(val) > 0) itemPrices[itemId] = parseFloat(val);
+      if (rent !== "")              data.rent = parseFloat(rent);
+      if (hiddenCharges !== "")     data.hidden_charges = parseFloat(hiddenCharges);
+
+      // Build per-item buying prices from weight rows
+      const itemBuyingPrices = {};
+      Object.entries(weightBuyingPrices).forEach(([key, val]) => {
+        if (!val || parseFloat(val) <= 0) return;
+        const [itemIdStr] = key.split("__");
+        // Use last entered value per item (if multiple weights, we store per-weight on the backend)
+        itemBuyingPrices[itemIdStr] = parseFloat(val);
       });
-      if (Object.keys(itemPrices).length > 0) data.item_buying_prices = itemPrices;
-      if (!data.mill_owner_name && Object.keys(itemPrices).length === 0 && !data.rent) {
-        toast.error("Please enter at least the Mill Owner or a buying price to save");
+
+      // Also build weight-level prices map: { item_id: { weight_kg: price } }
+      const weightPrices = {};
+      Object.entries(weightBuyingPrices).forEach(([key, val]) => {
+        if (!val || parseFloat(val) <= 0) return;
+        const [itemIdStr, wkgStr] = key.split("__");
+        if (!weightPrices[itemIdStr]) weightPrices[itemIdStr] = {};
+        weightPrices[itemIdStr][wkgStr] = parseFloat(val);
+      });
+
+      if (Object.keys(itemBuyingPrices).length > 0) {
+        data.item_buying_prices = itemBuyingPrices;
+        data.item_weight_prices = weightPrices;
+      }
+
+      if (!data.mill_owner_name && Object.keys(itemBuyingPrices).length === 0 && !data.rent) {
+        toast.error("Enter at least Mill Owner or one buying price to save");
         return;
       }
     } else {
-      if (location.trim()) data.location = location.trim();
       if (toWhom.trim())   data.commission_partner = toWhom.trim();
-      // Per-item selling prices
-      const itemPrices = {};
-      Object.entries(itemSellingPrices).forEach(([itemId, val]) => {
-        if (val && parseFloat(val) > 0) itemPrices[itemId] = parseFloat(val);
+      if (location.trim()) data.location = location.trim();
+
+      const itemSellingPrices = {};
+      const weightPrices = {};
+      Object.entries(weightSellingPrices).forEach(([key, val]) => {
+        if (!val || parseFloat(val) <= 0) return;
+        const [itemIdStr, wkgStr] = key.split("__");
+        itemSellingPrices[itemIdStr] = parseFloat(val);
+        if (!weightPrices[itemIdStr]) weightPrices[itemIdStr] = {};
+        weightPrices[itemIdStr][wkgStr] = parseFloat(val);
       });
-      // Also check existing item selling prices
-      const existingFilled = tx.items?.some(it => it.selling_price != null);
-      if (Object.keys(itemPrices).length > 0) data.item_selling_prices = itemPrices;
-      if (sellPrice) data.sell_price = parseFloat(sellPrice);
-      if (!data.sell_price && Object.keys(itemPrices).length === 0 && !existingFilled) {
-        toast.error("Please enter the Selling Price to save");
+
+      const existingFilled = tx.items?.some(it =>
+        it.selling_price != null || it.weights?.some(w => w.selling_price != null)
+      );
+
+      if (Object.keys(itemSellingPrices).length > 0) {
+        data.item_selling_prices = itemSellingPrices;
+        data.item_weight_sell_prices = weightPrices;
+      }
+
+      if (Object.keys(itemSellingPrices).length === 0 && !existingFilled) {
+        toast.error("Enter selling price for at least one item to save");
         return;
       }
     }
+
     setLoading(true);
     try { await onSave(tx.id, data); onClose(); }
     catch (err) { toast.error(getErrorMessage(err, "Failed to update")); }
@@ -1292,6 +1356,7 @@ function PendingAdminModal({ tx, onClose, onSave, i18n }) {
 
   return (
     <div className="space-y-4">
+      {/* Transaction summary card */}
       <div className="p-3 rounded-xl" style={{ backgroundColor: "var(--bg-secondary)" }}>
         <p className="text-sm font-bold" style={{ color: "var(--text-primary)" }}>
           {tx.vehicle_number || "—"} · {tx.total_bags || 0} bags
@@ -1304,126 +1369,178 @@ function PendingAdminModal({ tx, onClose, onSave, i18n }) {
 
       {isArrival ? (
         <>
+          {/* Mill Owner + Commission Partner */}
           <div>
             <label className="label flex items-center gap-1.5"><Factory size={11} /> Mill Owner Name</label>
-            <input className="input-field" value={millOwnerName} onChange={e => setMillOwnerName(e.target.value)} placeholder="Mill owner..." />
+            <input className="input-field" value={millOwnerName}
+              onChange={e => setMillOwnerName(e.target.value)} placeholder="Mill owner..." />
           </div>
           <div>
             <label className="label flex items-center gap-1.5"><UserCheck size={11} /> Commission Partner</label>
-            <input className="input-field" value={commissionPartner} onChange={e => setCommissionPartner(e.target.value)} placeholder="Agent / Partner..." />
+            <input className="input-field" value={commissionPartner}
+              onChange={e => setCommissionPartner(e.target.value)} placeholder="Agent / Partner..." />
           </div>
-          <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
-            Global Charges
-          </p>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            <div>
-              <label className="label text-[10px]">Rent (Global)</label>
-              <input type="number" step="0.01" className="input-field" value={rent} onWheel={e => e.target.blur()}
-                        onChange={e => setRent(e.target.value)} placeholder="0" />
-            </div>
-            <div>
-              <label className="label text-[10px]">Hidden Charges (Global)</label>
-              <input type="number" step="0.01" className="input-field" value={hiddenCharges} onWheel={e => e.target.blur()}
-                        onChange={e => setHiddenCharges(e.target.value)} placeholder="0" />
+
+          {/* Global charges */}
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wider mb-2"
+              style={{ color: "var(--text-muted)" }}>Global Charges</p>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              <div>
+                <label className="label text-[10px]">Rent</label>
+                <input type="number" step="0.01" className="input-field" value={rent}
+                  onWheel={e => e.target.blur()} onChange={e => setRent(e.target.value)} placeholder="0" />
+              </div>
+              <div>
+                <label className="label text-[10px]">Hidden Charges</label>
+                <input type="number" step="0.01" className="input-field" value={hiddenCharges}
+                  onWheel={e => e.target.blur()} onChange={e => setHiddenCharges(e.target.value)} placeholder="0" />
+              </div>
             </div>
           </div>
-          {/* Per-item buying prices */}
-          {tx.items && tx.items.length > 0 && (
-            <div className="space-y-2">
-              <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: "#6366f1" }}>
-                Buying Price per Item
+
+          {/* Per-weight buying prices */}
+          {allWeightRows.length > 0 && (
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: "#6366f1" }}>
+                Buying Price per Weight
               </p>
-              {tx.items.map((it, idx) => (
-                <div key={idx} className="rounded-xl p-3 space-y-1.5"
-                  style={{ backgroundColor: "rgba(99,102,241,0.04)", border: "1px dashed rgba(99,102,241,0.25)" }}>
-                  <p className="text-xs font-semibold" style={{ color: "var(--text-secondary)" }}>
-                    {it.brand?.name || `Brand #${it.brand_id}`}
-                    {it.rice_type_ref?.name && ` · ${it.rice_type_ref.name}`}
-                    <span className="ml-1 text-[10px]" style={{ color: "var(--text-muted)" }}>({it.total_bags} bags · {it.bag_size_kg}KG)</span>
-                  </p>
-                  <input type="number" step="0.01" className="input-field"
-                    defaultValue={it.buying_price || ""}
-                    onWheel={e => e.target.blur()}
-                        onChange={e => {
-                      const val = e.target.value;
-                      setItemBuyingPrices(prev => ({ ...prev, [it.id]: val }));
-                    }}
-                    placeholder="Buying price/bag e.g. 1500" />
-                </div>
-              ))}
+              <div className="space-y-2">
+                {allWeightRows.map(row => {
+                  const val = weightBuyingPrices[row.key] ?? "";
+                  const total = val && row.quantity ? (parseFloat(val) * row.quantity).toFixed(2) : null;
+                  return (
+                    <div key={row.key} className="rounded-xl p-3 space-y-2"
+                      style={{ backgroundColor: "rgba(99,102,241,0.04)", border: "1px dashed rgba(99,102,241,0.25)" }}>
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <span className="text-xs font-bold" style={{ color: "var(--text-primary)" }}>
+                            {row.brandLabel}
+                            {row.typeLabel && <span className="font-normal opacity-70"> · {row.typeLabel}</span>}
+                          </span>
+                          <span className="ml-2 text-[10px] font-semibold px-1.5 py-0.5 rounded"
+                            style={{ backgroundColor: row.isPiece ? "var(--warning-soft)" : "var(--success-soft)",
+                                     color: row.isPiece ? "var(--warning)" : "var(--success)" }}>
+                            {row.weight_kg} KG · {row.quantity} {row.unitLabel}{row.quantity !== 1 ? "s" : ""}
+                          </span>
+                        </div>
+                        {row.existingBuyPrice != null && val === "" && (
+                          <span className="text-[10px] font-bold" style={{ color: "#6366f1" }}>
+                            Saved: ₹{row.existingBuyPrice}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex gap-2 items-center">
+                        <input type="number" step="0.01" className="input-field flex-1"
+                          value={val}
+                          onWheel={e => e.target.blur()}
+                          onChange={e => setWeightBuyingPrices(p => ({ ...p, [row.key]: e.target.value }))}
+                          placeholder={`₹ per ${row.unitLabel}${row.existingBuyPrice ? ` (was ₹${row.existingBuyPrice})` : ""}`} />
+                        {total && (
+                          <span className="text-[10px] font-bold whitespace-nowrap" style={{ color: "#6366f1" }}>
+                            = ₹{total}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
         </>
       ) : (
         <>
+          {/* Send: To Whom + Location */}
           <div>
             <label className="label flex items-center gap-1.5"><UserIcon size={11} /> To Whom</label>
-            <input className="input-field" value={toWhom} onChange={e => setToWhom(e.target.value)} placeholder="Buyer / Recipient..." />
+            <input className="input-field" value={toWhom}
+              onChange={e => setToWhom(e.target.value)} placeholder="Buyer / Recipient..." />
           </div>
           <div>
             <label className="label flex items-center gap-1.5"><MapPin size={11} /> Location</label>
-            <input className="input-field" value={location} onChange={e => setLocation(e.target.value)} placeholder="Location..." />
+            <input className="input-field" value={location}
+              onChange={e => setLocation(e.target.value)} placeholder="Location..." />
           </div>
-          {/* Per-item selling prices */}
-          {tx.items && tx.items.length > 0 ? (
-            <div className="space-y-2">
-              <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: "#ef4444" }}>
-                Selling Price per Item *
+
+          {/* Per-weight selling prices */}
+          {allWeightRows.length > 0 ? (
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: "#ef4444" }}>
+                Selling Price per Weight *
               </p>
-              {tx.items.map((it, idx) => {
-                const spVal = itemSellingPrices[it.id] ?? (it.selling_price || "");
-                const bp = it.buying_price ?? tx.price;
-                const diff2 = spVal !== "" && bp != null ? Number(spVal) - bp : null;
-                const col = diff2 == null ? "var(--text-muted)" : diff2 > 0 ? "#10b981" : diff2 < 0 ? "#ef4444" : "var(--text-muted)";
-                return (
-                  <div key={idx} className="rounded-xl p-3 space-y-1.5"
-                    style={{ backgroundColor: "rgba(239,68,68,0.04)", border: "1.5px solid rgba(239,68,68,0.2)" }}>
-                    <p className="text-xs font-semibold" style={{ color: "var(--text-secondary)" }}>
-                      {it.brand?.name || `Brand #${it.brand_id}`}
-                      {it.rice_type_ref?.name && ` · ${it.rice_type_ref.name}`}
-                      <span className="ml-1 text-[10px]" style={{ color: "var(--text-muted)" }}>({it.total_bags} bags · {it.bag_size_kg}KG)</span>
-                    </p>
-                    <input type="number" step="0.01" className="input-field"
-                      value={spVal}
-                      onWheel={e => e.target.blur()}
-                        onChange={e => setItemSellingPrices(prev => ({ ...prev, [it.id]: e.target.value }))}
-                      placeholder="Selling price/bag e.g. 1600" />
-                    {spVal !== "" && Number(spVal) > 0 && (
-                      <div className="flex items-center gap-2 flex-wrap">
-                        {bp != null && <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>Buy: ₹{bp}</span>}
-                        {diff2 != null && (
-                          <span className="text-[10px] font-bold" style={{ color: col }}>
-                            {diff2 > 0 ? "+" : ""}{diff2.toFixed(2)}/bag
+              <div className="space-y-2">
+                {allWeightRows.map(row => {
+                  const val = weightSellingPrices[row.key] ?? "";
+                  const buyP = row.existingBuyPrice;
+                  const diff = val && buyP != null ? (parseFloat(val) - buyP) : null;
+                  const col = diff == null ? "var(--text-muted)" : diff > 0 ? "var(--success)" : diff < 0 ? "var(--danger)" : "var(--text-muted)";
+                  const bg  = diff == null ? "transparent" : diff > 0 ? "var(--success-soft)" : diff < 0 ? "var(--danger-soft)" : "transparent";
+                  const total = val && row.quantity ? (parseFloat(val) * row.quantity).toFixed(2) : null;
+                  return (
+                    <div key={row.key} className="rounded-xl p-3 space-y-2"
+                      style={{ backgroundColor: "rgba(239,68,68,0.04)", border: "1.5px solid rgba(239,68,68,0.2)" }}>
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <span className="text-xs font-bold" style={{ color: "var(--text-primary)" }}>
+                            {row.brandLabel}
+                            {row.typeLabel && <span className="font-normal opacity-70"> · {row.typeLabel}</span>}
+                          </span>
+                          <span className="ml-2 text-[10px] font-semibold px-1.5 py-0.5 rounded"
+                            style={{ backgroundColor: row.isPiece ? "var(--warning-soft)" : "var(--success-soft)",
+                                     color: row.isPiece ? "var(--warning)" : "var(--success)" }}>
+                            {row.weight_kg} KG · {row.quantity} {row.unitLabel}{row.quantity !== 1 ? "s" : ""}
+                          </span>
+                        </div>
+                        {buyP != null && (
+                          <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+                            Buy: ₹{buyP}/{row.unitLabel}
                           </span>
                         )}
-                        <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
-                          Total: ₹{(Number(spVal) * it.total_bags).toFixed(2)}
-                        </span>
                       </div>
-                    )}
-                  </div>
-                );
-              })}
+                      <div className="flex gap-2 items-center flex-wrap">
+                        <input type="number" step="0.01" className="input-field flex-1"
+                          value={val}
+                          onWheel={e => e.target.blur()}
+                          onChange={e => setWeightSellingPrices(p => ({ ...p, [row.key]: e.target.value }))}
+                          placeholder={`₹ per ${row.unitLabel}${row.existingSellPrice ? ` (was ₹${row.existingSellPrice})` : ""}`} />
+                        {diff != null && (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded"
+                            style={{ color: col, backgroundColor: bg }}>
+                            {diff > 0 ? "+" : ""}{diff.toFixed(2)}/{row.unitLabel}
+                          </span>
+                        )}
+                      </div>
+                      {total && (
+                        <p className="text-[10px] font-semibold" style={{ color: "var(--text-muted)" }}>
+                          Revenue: ₹{total}
+                          {diff != null && (
+                            <span className="ml-2" style={{ color: col }}>
+                              P&L: ₹{(diff * row.quantity).toFixed(2)}
+                            </span>
+                          )}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           ) : (
-            <div>
-              <label className="label flex items-center gap-1.5"><IndianRupee size={11} /> Sell Price/Bag</label>
-              <input type="number" step="0.01" className="input-field" value={sellPrice} onWheel={e => e.target.blur()}
-                        onChange={e => setSellPrice(e.target.value)} placeholder="1600" />
-              {diff !== null && (
-                <p className="text-sm font-bold mt-1.5" style={{ color: diff > 0 ? "#10b981" : diff < 0 ? "#ef4444" : "var(--text-primary)" }}>
-                  {diff > 0 ? `+${diff.toFixed(2)}` : diff.toFixed(2)} per bag
-                </p>
-              )}
-            </div>
+            <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+              No weight details found for this transaction.
+            </p>
           )}
         </>
       )}
 
-      <div className="flex gap-3 pt-1">
-        <button type="button" onClick={onClose} className="btn-secondary flex-1 justify-center">Close (keep pending)</button>
-        <button type="button" onClick={handleSave} disabled={loading} className="btn-primary flex-1 justify-center">
-          {loading ? "Saving..." : "Save"}
+      {/* Action buttons */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <button type="button" className="btn-secondary" onClick={onClose}>
+          Close (keep pending)
+        </button>
+        <button type="button" className="btn-primary" onClick={handleSave} disabled={loading}>
+          {loading ? "Saving…" : "Save"}
         </button>
       </div>
     </div>

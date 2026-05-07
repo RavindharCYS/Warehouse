@@ -416,19 +416,9 @@ def create_arrival(
     # Determine approval status
     # Admin must always fill pricing. If they skip it, transaction stays pending
     # so it shows on the dashboard until they come back and complete it.
-    if is_admin:
-        has_pricing = bool(txn.mill_owner_name or txn.price is not None)
-        if has_pricing:
-            txn.admin_pending = False
-            txn.approval_status = ApprovalStatus.completed
-            txn.completed_by = current_user.id
-            txn.completed_at = datetime.utcnow()
-        else:
-            txn.admin_pending = True
-            txn.approval_status = ApprovalStatus.pending
-    else:
-        txn.admin_pending = True
-        txn.approval_status = ApprovalStatus.pending
+    # Always start as pending — completion checked after items/weights saved below
+    txn.admin_pending = True
+    txn.approval_status = ApprovalStatus.pending
 
     db.add(txn)
     db.flush()
@@ -562,6 +552,19 @@ def create_arrival(
     txn.total_bags = grand_units
     txn.total_weight_kg = grand_kg
 
+    # Check if all weight rows have buying_price — if so, mark complete
+    if is_admin:
+        db.flush()
+        all_weights = db.query(TransactionItemWeight).join(TransactionItem).filter(
+            TransactionItem.transaction_id == txn.id
+        ).all()
+        all_priced = all(w.buying_price is not None for w in all_weights) if all_weights else False
+        if all_priced and txn.mill_owner_name:
+            txn.admin_pending = False
+            txn.approval_status = ApprovalStatus.completed
+            txn.completed_by = current_user.id
+            txn.completed_at = datetime.utcnow()
+
     db.commit()
     return _load_full_transaction(db, txn.id)
 
@@ -602,23 +605,10 @@ def create_send(
 
     if is_admin:
         txn.location = payload.location
-        txn.sell_price = payload.sell_price
-        # Check if ANY item has selling_price filled, or global sell_price is set
-        item_prices_filled = any(
-            getattr(it, "selling_price", None) is not None for it in (payload.items or [])
-        )
-        has_pricing = payload.sell_price is not None or item_prices_filled
-        if has_pricing:
-            txn.admin_pending = False
-            txn.approval_status = ApprovalStatus.completed
-            txn.completed_by = current_user.id
-            txn.completed_at = datetime.utcnow()
-        else:
-            txn.admin_pending = True
-            txn.approval_status = ApprovalStatus.pending
-    else:
-        txn.admin_pending = True
-        txn.approval_status = ApprovalStatus.pending
+
+    # Always start pending — completion set after items saved
+    txn.admin_pending = True
+    txn.approval_status = ApprovalStatus.pending
 
     db.add(txn)
     db.flush()
@@ -697,7 +687,30 @@ def create_send(
         )
         if last_in and last_in.price is not None:
             txn.price = last_in.price
-            txn.profit_loss = _compute_profit_loss(last_in.price, txn.sell_price, grand_bags)
+
+    # Check if ALL send items have selling_price — if so mark complete, compute P&L
+    if is_admin:
+        db.flush()
+        all_items = db.query(TransactionItem).filter(
+            TransactionItem.transaction_id == txn.id
+        ).all()
+        all_sell_priced = all(it.selling_price is not None for it in all_items) if all_items else False
+        if all_sell_priced:
+            # Compute weighted avg sell_price
+            total_val  = sum((it.selling_price or 0) * (it.total_bags or 0) for it in all_items)
+            total_qty  = sum(it.total_bags or 0 for it in all_items)
+            txn.sell_price = round(total_val / total_qty, 4) if total_qty else None
+
+            # Compute P&L per-item
+            total_buy_val  = sum((it.buying_price or txn.price or 0) * (it.total_bags or 0) for it in all_items)
+            total_sell_val = sum((it.selling_price or 0) * (it.total_bags or 0) for it in all_items)
+            if grand_bags:
+                txn.profit_loss = round((total_sell_val - total_buy_val) / grand_bags, 4)
+
+            txn.admin_pending = False
+            txn.approval_status = ApprovalStatus.completed
+            txn.completed_by = current_user.id
+            txn.completed_at = datetime.utcnow()
 
     db.commit()
     return _load_full_transaction(db, txn.id)
@@ -729,11 +742,10 @@ def complete_admin_fields(
         elif "mill_owner_name" in payload and payload["mill_owner_name"]:
             tx.mill_owner_name = payload["mill_owner_name"]
 
-        if "price" in payload:           tx.price = payload["price"]
         if "rent" in payload:            tx.rent = payload["rent"]
         if "hidden_charges" in payload:  tx.hidden_charges = payload["hidden_charges"]
 
-        # Per-item buying prices: { item_id: price }
+        # Per-item buying prices: { item_id: price } — sets item-level buying_price
         if "item_buying_prices" in payload and isinstance(payload["item_buying_prices"], dict):
             for item_id_str, buying_price in payload["item_buying_prices"].items():
                 try:
@@ -746,14 +758,38 @@ def complete_admin_fields(
                         ti.buying_price = float(buying_price)
                 except (ValueError, TypeError):
                     pass
-            # Also set global price to first item's buying price for backward compat
-            first_item = tx.items[0] if tx.items else None
-            if first_item and first_item.buying_price is not None and tx.price is None:
-                tx.price = first_item.buying_price
+
+        # Per-weight buying prices: { item_id: { weight_kg: price } }
+        if "item_weight_prices" in payload and isinstance(payload["item_weight_prices"], dict):
+            for item_id_str, wkg_map in payload["item_weight_prices"].items():
+                if not isinstance(wkg_map, dict):
+                    continue
+                try:
+                    item_id = int(item_id_str)
+                    for wkg_str, bp in wkg_map.items():
+                        wkg = float(wkg_str)
+                        tiw = db.query(TransactionItemWeight).filter(
+                            TransactionItemWeight.item_id == item_id,
+                            TransactionItemWeight.weight_kg == wkg,
+                        ).first()
+                        if tiw and bp is not None:
+                            tiw.buying_price = float(bp)
+                except (ValueError, TypeError):
+                    pass
+
+        # Set global tx.price = weighted-average buying price across all weight rows
+        db.flush()
+        all_weights = db.query(TransactionItemWeight).join(TransactionItem).filter(
+            TransactionItem.transaction_id == tx.id
+        ).all()
+        priced = [(w.buying_price, w.quantity) for w in all_weights if w.buying_price is not None]
+        if priced:
+            total_val = sum(p * q for p, q in priced)
+            total_qty = sum(q for _, q in priced)
+            tx.price = round(total_val / total_qty, 4) if total_qty else None
 
     else:  # outbound
         if "location" in payload:        tx.location = payload["location"]
-        if "sell_price" in payload:      tx.sell_price = payload["sell_price"]
 
         # Per-item selling prices: { item_id: price }
         if "item_selling_prices" in payload and isinstance(payload["item_selling_prices"], dict):
@@ -768,19 +804,76 @@ def complete_admin_fields(
                         ti.selling_price = float(selling_price)
                 except (ValueError, TypeError):
                     pass
-            # Also set global sell_price to first item's selling price for backward compat
-            db.flush()
-            first_item = tx.items[0] if tx.items else None
-            if first_item and first_item.selling_price is not None and tx.sell_price is None:
-                tx.sell_price = first_item.selling_price
 
-        if tx.sell_price is not None and tx.price is not None:
+        # Per-weight selling prices: { item_id: { weight_kg: price } }
+        if "item_weight_sell_prices" in payload and isinstance(payload["item_weight_sell_prices"], dict):
+            for item_id_str, wkg_map in payload["item_weight_sell_prices"].items():
+                if not isinstance(wkg_map, dict):
+                    continue
+                try:
+                    item_id = int(item_id_str)
+                    for wkg_str, sp in wkg_map.items():
+                        wkg = float(wkg_str)
+                        tiw = db.query(TransactionItemWeight).filter(
+                            TransactionItemWeight.item_id == item_id,
+                            TransactionItemWeight.weight_kg == wkg,
+                        ).first()
+                        if tiw and sp is not None:
+                            tiw.selling_price = float(sp) if hasattr(tiw, "selling_price") else None
+                except (ValueError, TypeError):
+                    pass
+
+        db.flush()
+
+        # Set global sell_price = weighted avg of all item selling prices
+        all_items = db.query(TransactionItem).filter(
+            TransactionItem.transaction_id == tx.id
+        ).all()
+        priced_sell = [(it.selling_price, it.total_bags) for it in all_items if it.selling_price is not None]
+        if priced_sell:
+            total_val = sum(p * q for p, q in priced_sell)
+            total_qty = sum(q for _, q in priced_sell)
+            tx.sell_price = round(total_val / total_qty, 4) if total_qty else None
+
+        # Compute P&L: per-item (buy price × qty vs sell price × qty)
+        all_items_fresh = db.query(TransactionItem).filter(
+            TransactionItem.transaction_id == tx.id
+        ).all()
+        total_buy = 0.0
+        total_sell = 0.0
+        has_both = False
+        for it in all_items_fresh:
+            bp = it.buying_price
+            sp = it.selling_price
+            qty = it.total_bags or 0
+            if bp is not None and sp is not None and qty > 0:
+                total_buy  += bp * qty
+                total_sell += sp * qty
+                has_both = True
+        if has_both and tx.total_bags:
+            tx.profit_loss = round((total_sell - total_buy) / tx.total_bags, 4)
+        elif tx.sell_price is not None and tx.price is not None:
             tx.profit_loss = _compute_profit_loss(tx.price, tx.sell_price, tx.total_bags or 0)
 
-    tx.admin_pending = False
-    tx.approval_status = ApprovalStatus.completed
-    tx.completed_by = current_user.id
-    tx.completed_at = datetime.utcnow()
+    # Mark pending based on whether all weight rows have prices
+    if tx.transaction_type == TransactionType.inbound:
+        all_w = db.query(TransactionItemWeight).join(TransactionItem).filter(
+            TransactionItem.transaction_id == tx.id
+        ).all()
+        all_priced = all(w.buying_price is not None for w in all_w) if all_w else False
+        tx.admin_pending = not all_priced
+        tx.approval_status = ApprovalStatus.pending if tx.admin_pending else ApprovalStatus.completed
+    else:
+        all_items_check = db.query(TransactionItem).filter(
+            TransactionItem.transaction_id == tx.id
+        ).all()
+        all_sell_priced = all(it.selling_price is not None for it in all_items_check) if all_items_check else False
+        tx.admin_pending = not all_sell_priced
+        tx.approval_status = ApprovalStatus.pending if tx.admin_pending else ApprovalStatus.completed
+
+    if not tx.admin_pending:
+        tx.completed_by = current_user.id
+        tx.completed_at = datetime.utcnow()
 
     db.commit()
     return _load_full_transaction(db, tx.id)

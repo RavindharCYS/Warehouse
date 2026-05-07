@@ -520,6 +520,7 @@ class TransactionItemWeightOut(BaseModel):
     weight_kg: float
     quantity: int
     buying_price: Optional[float] = None
+    selling_price: Optional[float] = None
 
 
 class TransactionItemSplitOut(BaseModel):
