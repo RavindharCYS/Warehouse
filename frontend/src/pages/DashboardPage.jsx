@@ -164,18 +164,17 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onMaste
     transaction_date: format(new Date(), "yyyy-MM-dd'T'HH:mm"),
     notes: "",
     mill_owner_name: "",
-    price: "",
     rent: "",
     hidden_charges: "",
+    // price is now per-weight-row, not global
   });
 
   // Per item: brand + ricetype + bag_size + warehouseGroups[]
-  const blankRow = () => ({ weight: "", quantity: "" });
+  const blankRow = () => ({ weight: "", quantity: "", buying_price: "" });
   const blankGroup = () => ({ warehouse_id: "", rows: [blankRow()] });
   const blankItem = () => ({
     brand_id: "",
     rice_type_id: "",
-    bag_size: 25,
     warehouseGroups: [blankGroup()],
   });
 
@@ -306,6 +305,7 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onMaste
         weight: Number(r.weight) || 0,
         quantity: Number(r.quantity) || 0,
         warehouse_id: g.warehouse_id,
+        buying_price: r.buying_price !== "" && r.buying_price != null ? Number(r.buying_price) : null,
       }))
     );
 
@@ -341,13 +341,12 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onMaste
     [itemTotals]
   );
 
-  const totalCost = useMemo(() => {
-    const p = Number(header.price) || 0;
+  const totalGlobalCharges = useMemo(() => {
     const r = Number(header.rent) || 0;
     const h = Number(header.hidden_charges) || 0;
-    if (p === 0 && r === 0 && h === 0) return null;
-    return p + r + h;
-  }, [header.price, header.rent, header.hidden_charges]);
+    if (r === 0 && h === 0) return null;
+    return r + h;
+  }, [header.rent, header.hidden_charges]);
 
   // ── Submit ──
   const handleSubmit = async (e) => {
@@ -408,10 +407,18 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onMaste
             splitAgg.set(en.warehouse_id, (splitAgg.get(en.warehouse_id) || 0) + en.quantity);
           }
 
+          // Per-weight buying prices
+          const weightPriceAgg = new Map();
+          for (const en of validEntries) {
+            if (isAdmin && en.buying_price != null) weightPriceAgg.set(en.weight, en.buying_price);
+          }
+          // Derive item-level buying_price: use only if single uniform price across all rows
+          const allRowPrices = flatEntries(it).map((r) => r.buying_price).filter((p) => p != null && p > 0);
+          const itemBuyingPrice = allRowPrices.length === 1 ? allRowPrices[0] : null;
+
           return {
             brand_id: Number(it.brand_id),
             rice_type_id: it.rice_type_id ? Number(it.rice_type_id) : null,
-            bag_size: Number(it.bag_size),
             total_bags: itemTotals[i].totalBagUnits,
             total_pieces: itemTotals[i].totalPieceUnits,
             total_units: itemTotals[i].totalUnits,
@@ -420,17 +427,18 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onMaste
             weights: Array.from(weightAgg.entries()).map(([weight, quantity]) => ({
               weight,
               quantity,
+              ...(isAdmin && weightPriceAgg.has(weight) ? { buying_price: weightPriceAgg.get(weight) } : {}),
             })),
             warehouse_splits: Array.from(splitAgg.entries()).map(([warehouse_id, bags]) => ({
               warehouse_id,
               bags,
             })),
+            ...(isAdmin && itemBuyingPrice != null ? { buying_price: itemBuyingPrice } : {}),
           };
         }),
         ...(isAdmin
           ? {
               mill_owner_name: header.mill_owner_name || null,
-              price: header.price !== "" ? Number(header.price) : null,
               rent: header.rent !== "" ? Number(header.rent) : null,
               hidden_charges: header.hidden_charges !== "" ? Number(header.hidden_charges) : null,
             }
@@ -541,42 +549,37 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onMaste
                   placeholder="Agent / Partner..."
                 />
               </div>
+              <p className="text-[10px] font-bold uppercase tracking-wider sm:col-span-2 mt-1" style={{ color: "var(--text-muted)" }}>
+                Global Charges (apply to entire vehicle)
+              </p>
               <div>
-                <label className="label flex items-center gap-1.5">
-                  <IndianRupee size={11} /> Price (per bag)
-                </label>
-                <input
-                  type="number"
-                  step="0.01"
-                  className="input-field"
-                  value={header.price}
-                  onChange={(e) => setHeader((h) => ({ ...h, price: e.target.value }))}
-                  placeholder="0.00"
-                />
-              </div>
-              <div>
-                <label className="label">Rent</label>
+                <label className="label">Rent (Global)</label>
                 <input
                   type="number"
                   step="0.01"
                   className="input-field"
                   value={header.rent}
+                  onWheel={(e) => e.target.blur()}
                   onChange={(e) => setHeader((h) => ({ ...h, rent: e.target.value }))}
                   placeholder="0.00"
                 />
               </div>
-              <div className="sm:col-span-2">
-                <label className="label">Hidden Charges</label>
+              <div>
+                <label className="label">Hidden Charges (Global)</label>
                 <input
                   type="number"
                   step="0.01"
                   className="input-field"
                   value={header.hidden_charges}
+                  onWheel={(e) => e.target.blur()}
                   onChange={(e) => setHeader((h) => ({ ...h, hidden_charges: e.target.value }))}
                   placeholder="0.00"
                 />
               </div>
-              {totalCost !== null && (
+              <p className="text-[10px] sm:col-span-2 font-semibold" style={{ color: "rgba(99,102,241,0.8)" }}>
+                💡 Buying price per unit is entered in each weight row above
+              </p>
+              {totalGlobalCharges !== null && (
                 <div
                   className="sm:col-span-2 rounded-xl p-3 flex items-center justify-between"
                   style={{
@@ -586,12 +589,11 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onMaste
                 >
                   <div>
                     <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
-                      Total Amount
+                      Total Global Charges
                     </p>
                     <div className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
                       {[
-                        header.price ? `Price ₹${header.price}` : null,
-                        header.rent ? `+ Rent ₹${header.rent}` : null,
+                        header.rent ? `Rent ₹${header.rent}` : null,
                         header.hidden_charges ? `+ Charges ₹${header.hidden_charges}` : null,
                       ]
                         .filter(Boolean)
@@ -599,7 +601,7 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onMaste
                     </div>
                   </div>
                   <span className="text-xl font-extrabold tabular-nums" style={{ color: "var(--accent)" }}>
-                    ₹{totalCost.toFixed(2)}
+                    ₹{totalGlobalCharges.toFixed(2)}
                   </span>
                 </div>
               )}
@@ -631,8 +633,8 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onMaste
                 )}
               </div>
 
-              {/* Brand / Rice Type / Bag Size */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {/* Brand / Rice Type */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="label">Brand *</label>
                   <select
@@ -703,23 +705,6 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onMaste
                   </div>
                 </div>
 
-                <div>
-                  <label className="label">Bag Size</label>
-                  <select
-                    className="input-field"
-                    value={it.bag_size}
-                    onChange={(e) => updateItem(idx, { bag_size: e.target.value })}
-                  >
-                    {BAG_SIZES.map((b) => (
-                      <option key={b} value={b}>
-                        {b} KG / bag
-                      </option>
-                    ))}
-                  </select>
-                  <p className="text-[10px] mt-2 font-medium" style={{ color: "var(--text-muted)" }}>
-                    Used to pool pieces in stock view.
-                  </p>
-                </div>
               </div>
 
               {/* ── Warehouse groups ── */}
@@ -814,7 +799,7 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onMaste
                           <div
                             style={{
                               display: "grid",
-                              gridTemplateColumns: "1fr 1fr auto",
+                              gridTemplateColumns: isAdmin ? "1fr 1fr 1fr auto" : "1fr 1fr auto",
                               gap: 8,
                               alignItems: "end",
                             }}
@@ -831,7 +816,14 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onMaste
                             >
                               Quantity
                             </label>
-                            {/* spacer for delete column */}
+                            {isAdmin && (
+                              <label
+                                className="text-[9px] font-bold uppercase tracking-wider"
+                                style={{ color: "#6366f1" }}
+                              >
+                                ₹ / Unit
+                              </label>
+                            )}
                             <div style={{ width: 32 }} />
                           </div>
 
@@ -859,11 +851,11 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onMaste
 
                             return (
                               <div key={rIdx}>
-                                {/* Input row: Weight | Qty | Delete — always on one line */}
+                                {/* Input row: Weight | Qty | Price(admin) | Delete */}
                                 <div
                                   style={{
                                     display: "grid",
-                                    gridTemplateColumns: "1fr 1fr auto",
+                                    gridTemplateColumns: isAdmin ? "1fr 1fr 1fr auto" : "1fr 1fr auto",
                                     gap: 8,
                                     alignItems: "center",
                                   }}
@@ -876,6 +868,7 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onMaste
                                     placeholder="25"
                                     value={row.weight}
                                     style={{ minWidth: 0 }}
+                                    onWheel={(e) => e.target.blur()}
                                     onChange={(e) =>
                                       updateRow(idx, gIdx, rIdx, { weight: e.target.value })
                                     }
@@ -887,10 +880,26 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onMaste
                                     placeholder="5"
                                     value={row.quantity}
                                     style={{ minWidth: 0 }}
+                                    onWheel={(e) => e.target.blur()}
                                     onChange={(e) =>
                                       updateRow(idx, gIdx, rIdx, { quantity: e.target.value })
                                     }
                                   />
+                                  {isAdmin && (
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      step="0.01"
+                                      className="input-field"
+                                      placeholder="₹ price"
+                                      value={row.buying_price || ""}
+                                      style={{ minWidth: 0 }}
+                                      onWheel={(e) => e.target.blur()}
+                                      onChange={(e) =>
+                                        updateRow(idx, gIdx, rIdx, { buying_price: e.target.value })
+                                      }
+                                    />
+                                  )}
                                   {/* Delete button — always occupies its column, invisible if only 1 row */}
                                   <button
                                     type="button"
@@ -913,9 +922,9 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onMaste
                                   </button>
                                 </div>
 
-                                {/* Kind badge + KG total — inline below inputs, only when values filled */}
+                                {/* Kind badge + KG total + price badge */}
                                 {wt > 0 && qty > 0 && (
-                                  <div className="flex items-center gap-2 mt-1.5 pl-1">
+                                  <div className="flex items-center gap-2 mt-1.5 pl-1 flex-wrap">
                                     <span
                                       className="text-[10px] font-bold px-2 py-0.5 rounded-md flex items-center gap-1"
                                       style={{ color: kindColor, backgroundColor: kindBg }}
@@ -929,6 +938,14 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onMaste
                                     >
                                       = {(wt * qty).toFixed(1)} KG
                                     </span>
+                                    {isAdmin && row.buying_price && Number(row.buying_price) > 0 && (
+                                      <span
+                                        className="text-[10px] font-bold px-2 py-0.5 rounded-md"
+                                        style={{ color: "#6366f1", backgroundColor: "rgba(99,102,241,0.08)" }}
+                                      >
+                                        ₹{Number(row.buying_price).toFixed(2)}/{isBag ? "bag" : "piece"} · ₹{(Number(row.buying_price) * qty).toFixed(2)} total
+                                      </span>
+                                    )}
                                   </div>
                                 )}
                               </div>
@@ -1152,7 +1169,7 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks }) {
     sell_price: "",
   });
 
-  const blankItem = () => ({ brand_id: "", warehouse_id: "", bag_weight_kg: "", bags: "" });
+  const blankItem = () => ({ brand_id: "", warehouse_id: "", bag_weight_kg: "", bags: "", selling_price: "" });
   const [items, setItems] = useState([blankItem()]);
   const [loading, setLoading] = useState(false);
 
@@ -1275,6 +1292,7 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks }) {
           warehouse_id: Number(it.warehouse_id),
           bag_weight_kg: Number(it.bag_weight_kg),
           bags: Number(it.bags),
+          ...(isAdmin && it.selling_price !== "" ? { selling_price: Number(it.selling_price) } : {}),
         })),
         ...(isAdmin
           ? {
@@ -1386,13 +1404,14 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks }) {
               </div>
               <div>
                 <label className="label flex items-center gap-1.5">
-                  <IndianRupee size={11} /> Sell Price (per bag)
+                  <IndianRupee size={11} /> Global Sell Price (fallback)
                 </label>
                 <input
                   type="number"
                   step="0.01"
                   className="input-field"
                   value={header.sell_price}
+                  onWheel={(e) => e.target.blur()}
                   onChange={(e) => setHeader((h) => ({ ...h, sell_price: e.target.value }))}
                   placeholder="0.00"
                 />
@@ -1552,6 +1571,7 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks }) {
                     max={maxUnits || undefined}
                     className="input-field"
                     value={it.bags}
+                    onWheel={(e) => e.target.blur()}
                     onChange={(e) => updateItem(idx, { bags: e.target.value })}
                     disabled={!it.bag_weight_kg}
                     placeholder={maxUnits > 0 ? `1 to ${maxUnits}` : "—"}
@@ -1569,43 +1589,46 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks }) {
                 </div>
               </div>
 
-              {isAdmin && buyPrice != null && header.sell_price !== "" && (
+              {/* Per-item selling price (admin) */}
+              {isAdmin && (
                 <div
-                  className="mt-3 p-3 rounded-xl flex items-center justify-between"
-                  style={{
-                    backgroundColor: "var(--bg-secondary)",
-                    border: "1px solid var(--border-light)",
-                  }}
+                  className="mt-3 p-3 rounded-xl space-y-1.5"
+                  style={{ backgroundColor: "rgba(239,68,68,0.04)", border: "1.5px solid rgba(239,68,68,0.2)" }}
                 >
-                  <span className="text-xs font-semibold" style={{ color: "var(--text-muted)" }}>
-                    Buy: ₹{buyPrice}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-bold tabular-nums" style={{ color: "var(--text-primary)" }}>
-                      ₹{Number(header.sell_price).toFixed(2)}
-                    </span>
-                    <span className="text-xs font-bold">→</span>
-                    <span
-                      className="text-sm font-bold tabular-nums px-2 py-0.5 rounded-lg"
-                      style={{
-                        color:
-                          Number(header.sell_price) - buyPrice > 0
-                            ? "var(--success)"
-                            : Number(header.sell_price) - buyPrice < 0
-                            ? "var(--danger)"
-                            : "var(--text-muted)",
-                        backgroundColor:
-                          Number(header.sell_price) - buyPrice > 0
-                            ? "var(--success-soft)"
-                            : Number(header.sell_price) - buyPrice < 0
-                            ? "var(--danger-soft)"
-                            : "var(--bg-secondary)",
-                      }}
-                    >
-                      ({Number(header.sell_price) - buyPrice > 0 ? "+" : ""}
-                      {(Number(header.sell_price) - buyPrice).toFixed(2)})
-                    </span>
-                  </div>
+                  <label className="text-[9px] font-bold uppercase tracking-wider flex items-center gap-1" style={{ color: "#ef4444" }}>
+                    <IndianRupee size={10} /> Selling Price / {it.bag_weight_kg && Number(it.bag_weight_kg) < 25 ? "piece" : "bag"} *
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    className="input-field"
+                    value={it.selling_price}
+                    onWheel={(e) => e.target.blur()}
+                    onChange={(e) => updateItem(idx, { selling_price: e.target.value })}
+                    placeholder="e.g. 1600.00"
+                  />
+                  {it.selling_price !== "" && Number(it.selling_price) > 0 && (() => {
+                    const sp = Number(it.selling_price);
+                    const diff = buyPrice != null ? sp - buyPrice : null;
+                    const col = diff == null ? "var(--text-muted)" : diff > 0 ? "var(--success)" : diff < 0 ? "var(--danger)" : "var(--text-muted)";
+                    const bg  = diff == null ? "var(--bg-secondary)" : diff > 0 ? "var(--success-soft)" : diff < 0 ? "var(--danger-soft)" : "var(--bg-secondary)";
+                    return (
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {buyPrice != null && <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>Buy: ₹{buyPrice}</span>}
+                        {diff != null && (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded" style={{ color: col, backgroundColor: bg }}>
+                            {diff > 0 ? "+" : ""}{diff.toFixed(2)}/unit
+                          </span>
+                        )}
+                        {it.bags && Number(it.bags) > 0 && (
+                          <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+                            Total: ₹{(sp * Number(it.bags)).toFixed(2)}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
             </div>
