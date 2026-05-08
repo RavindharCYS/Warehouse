@@ -3,7 +3,7 @@ import React, { useEffect, useState, useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Warehouse, Package, TrendingUp, TrendingDown, AlertTriangle,
-  ArrowRight, Activity, ArrowDownToLine, ArrowUpFromLine,
+  ArrowRight, Activity, ArrowDownToLine, ArrowUpFromLine, X,
   Plus, Trash2, ClipboardList, Truck, User, Phone, MapPin,
   IndianRupee, Factory, Box, Layers, PlusCircle,
 } from "lucide-react";
@@ -1158,28 +1158,36 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks }) {
   const { isAdmin } = useAuth();
 
   const [header, setHeader] = useState({
-    vehicle_number: "",
-    driver_name: "",
-    driver_number: "",
-    destination: "",
-    to_whom: "",
+    vehicle_number: "", driver_name: "", driver_number: "",
+    destination: "", to_whom: "", location: "",
     transaction_date: format(new Date(), "yyyy-MM-dd'T'HH:mm"),
     notes: "",
-    location: "",
-    sell_price: "",
   });
 
-  const blankItem = () => ({ brand_id: "", warehouse_id: "", bag_weight_kg: "", bags: "", selling_price: "" });
-  const [items, setItems] = useState([blankItem()]);
+  // One group per brand+warehouse; weight_rows keyed by weight_kg
+  const blankGroup = () => ({ brand_id: "", warehouse_id: "", weight_rows: {} });
+  const [groups, setGroups] = useState([blankGroup()]);
   const [loading, setLoading] = useState(false);
 
-  const addItem = () => setItems((p) => [...p, blankItem()]);
-  const removeItem = (i) => setItems((p) => p.filter((_, idx) => idx !== i));
-  const updateItem = (i, patch) =>
-    setItems((p) => p.map((it, idx) => (idx === i ? { ...it, ...patch } : it)));
+  const addGroup    = () => setGroups((p) => [...p, blankGroup()]);
+  const removeGroup = (i) => setGroups((p) => p.filter((_, idx) => idx !== i));
+  const updateGroup = (i, patch) =>
+    setGroups((p) => p.map((g, idx) => (idx === i ? { ...g, ...patch } : g)));
+  const updateWeightRow = (gi, wkg, patch) =>
+    setGroups((p) =>
+      p.map((g, idx) =>
+        idx !== gi ? g : {
+          ...g,
+          weight_rows: {
+            ...g.weight_rows,
+            [wkg]: { ...(g.weight_rows[wkg] || { qty: "", selling_price: "" }), ...patch },
+          },
+        }
+      )
+    );
 
   const stocksWithQty = useMemo(
-    () => stocks.filter((s) => (s.total_bags ?? s.remaining_bags ?? 0) > 0),
+    () => stocks.filter((s) => (s.remaining_bags ?? s.total_bags ?? 0) > 0),
     [stocks]
   );
 
@@ -1188,7 +1196,7 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks }) {
     return brands.filter((b) => bIds.has(String(b.id)));
   }, [brands, stocksWithQty]);
 
-  const warehousesForBrand = (brandId) => {
+  const warehousesForGroup = (brandId) => {
     if (!brandId) return [];
     const wIds = new Set(
       stocksWithQty
@@ -1198,83 +1206,80 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks }) {
     return warehouses.filter((w) => wIds.has(w.id));
   };
 
-  const weightsForItem = (it) => {
-    if (!it.brand_id || !it.warehouse_id) return [];
-    return stocksWithQty
-      .filter(
-        (s) =>
-          String(s.brand_id ?? s.brand?.id) === String(it.brand_id) &&
-          String(s.warehouse_id ?? s.warehouse?.id) === String(it.warehouse_id)
-      )
-      .sort((a, b) => b.bag_weight_kg - a.bag_weight_kg);
-  };
-
-  const maxUnitsForItem = (it) => {
-    const s = stocksWithQty.find(
+  const weightRowsForGroup = (brandId, warehouseId) => {
+    if (!brandId || !warehouseId) return [];
+    const matchingStocks = stocksWithQty.filter(
       (s) =>
-        String(s.brand_id ?? s.brand?.id) === String(it.brand_id) &&
-        String(s.warehouse_id ?? s.warehouse?.id) === String(it.warehouse_id) &&
-        Number(s.bag_weight_kg) === Number(it.bag_weight_kg)
+        String(s.brand_id ?? s.brand?.id) === String(brandId) &&
+        String(s.warehouse_id ?? s.warehouse?.id) === String(warehouseId)
     );
-    return s ? Number(s.total_bags ?? s.remaining_bags ?? 0) : 0;
+    const weightMap = new Map();
+    for (const s of matchingStocks) {
+      const remaining = s.remaining_bags ?? s.total_bags ?? 0;
+      if (s.weight_breakdowns && s.weight_breakdowns.length > 0) {
+        for (const wb of s.weight_breakdowns) {
+          if ((wb.quantity || 0) <= 0) continue;
+          weightMap.set(wb.weight_kg, {
+            weight_kg: wb.weight_kg,
+            qty: (weightMap.get(wb.weight_kg)?.qty || 0) + wb.quantity,
+            last_buy_price: s.last_buy_price ?? null,
+            isPiece: wb.weight_kg < 25,
+          });
+        }
+      } else if (remaining > 0) {
+        const wkg = s.bag_weight_kg;
+        weightMap.set(wkg, {
+          weight_kg: wkg,
+          qty: (weightMap.get(wkg)?.qty || 0) + remaining,
+          last_buy_price: s.last_buy_price ?? null,
+          isPiece: wkg < 25,
+        });
+      }
+    }
+    return Array.from(weightMap.values()).sort((a, b) => b.weight_kg - a.weight_kg);
   };
 
-  const buyPriceForItem = (it) => {
-    const s = stocksWithQty.find(
-      (s) =>
-        String(s.brand_id ?? s.brand?.id) === String(it.brand_id) &&
-        String(s.warehouse_id ?? s.warehouse?.id) === String(it.warehouse_id) &&
-        Number(s.bag_weight_kg) === Number(it.bag_weight_kg)
-    );
-    return s?.last_buy_price ?? s?.price ?? null;
-  };
-
-  const warehouseBagTotal = (brandId, warehouseId) => {
-    return stocksWithQty
-      .filter(
-        (s) =>
-          String(s.brand_id ?? s.brand?.id) === String(brandId) &&
-          String(s.warehouse_id ?? s.warehouse?.id) === String(warehouseId)
-      )
-      .reduce((sum, s) => sum + Number(s.total_bags ?? s.remaining_bags ?? 0), 0);
-  };
+  const grandUnits = groups.reduce(
+    (sum, g) =>
+      sum + Object.values(g.weight_rows).reduce((s, r) => s + (Number(r.qty) || 0), 0),
+    0
+  );
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!header.vehicle_number || !header.driver_name || !header.driver_number) {
-      return toast.error("Vehicle number, driver name & driver number are required");
-    }
-    if (header.driver_number.length !== 10) {
-      return toast.error("Driver number must be exactly 10 digits");
-    }
-    for (let i = 0; i < items.length; i++) {
-      const it = items[i];
-      if (!it.brand_id || !it.warehouse_id || !it.bag_weight_kg || !it.bags) {
-        return toast.error(`Item ${i + 1}: Fill all fields`);
-      }
-      const maxBags = maxUnitsForItem(it);
-      if (Number(it.bags) > maxBags) {
-        return toast.error(`Item ${i + 1}: Only ${maxBags} available in stock`);
-      }
-      if (Number(it.bags) <= 0) {
-        return toast.error(`Item ${i + 1}: Quantity must be greater than 0`);
-      }
-    }
+    if (!header.vehicle_number || !header.driver_name || !header.driver_number)
+      return toast.error("Vehicle, driver name & number required");
+    if (header.driver_number.length !== 10)
+      return toast.error("Driver number must be 10 digits");
 
-    const cumulative = new Map();
-    for (let i = 0; i < items.length; i++) {
-      const it = items[i];
-      const key = `${it.brand_id}|${it.warehouse_id}|${it.bag_weight_kg}`;
-      const used = cumulative.get(key) || 0;
-      const newUsed = used + Number(it.bags);
-      const max = maxUnitsForItem(it);
-      if (newUsed > max) {
-        return toast.error(
-          `Items duplicated for same stock — total ${newUsed} exceeds available ${max}`
-        );
+    const payloadItems = [];
+    for (let gi = 0; gi < groups.length; gi++) {
+      const g = groups[gi];
+      if (!g.brand_id) return toast.error(`Send #${gi + 1}: Select a brand`);
+      if (!g.warehouse_id) return toast.error(`Send #${gi + 1}: Select a warehouse`);
+
+      const availWeights = weightRowsForGroup(g.brand_id, g.warehouse_id);
+      let hasAnyQty = false;
+
+      for (const wr of availWeights) {
+        const row = g.weight_rows[wr.weight_kg] || {};
+        const qty = Number(row.qty) || 0;
+        if (qty <= 0) continue;
+        hasAnyQty = true;
+        if (qty > wr.qty) return toast.error(`Send #${gi + 1} · ${wr.weight_kg}KG: Exceeds available (${wr.qty})`);
+        if (isAdmin && (!row.selling_price || Number(row.selling_price) <= 0))
+          return toast.error(`Send #${gi + 1} · ${wr.weight_kg}KG: Enter selling price`);
+        payloadItems.push({
+          brand_id: Number(g.brand_id),
+          warehouse_id: Number(g.warehouse_id),
+          bag_weight_kg: wr.weight_kg,
+          bags: qty,
+          ...(isAdmin && row.selling_price ? { selling_price: Number(row.selling_price) } : {}),
+        });
       }
-      cumulative.set(key, newUsed);
+      if (!hasAnyQty) return toast.error(`Send #${gi + 1}: Enter quantity for at least one weight`);
     }
+    if (payloadItems.length === 0) return toast.error("No items to send");
 
     setLoading(true);
     try {
@@ -1284,24 +1289,14 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks }) {
         driver_name: header.driver_name,
         driver_number: header.driver_number,
         destination: header.destination || null,
-        commission_partner: isAdmin ? (header.to_whom || null) : null,
+        commission_partner: isAdmin ? header.to_whom || null : null,
         transaction_date: new Date(header.transaction_date).toISOString(),
         notes: header.notes || null,
-        items: items.map((it) => ({
-          brand_id: Number(it.brand_id),
-          warehouse_id: Number(it.warehouse_id),
-          bag_weight_kg: Number(it.bag_weight_kg),
-          bags: Number(it.bags),
-          ...(isAdmin && it.selling_price !== "" ? { selling_price: Number(it.selling_price) } : {}),
-        })),
-        ...(isAdmin
-          ? {
-              location: header.location || null,
-              sell_price: header.sell_price !== "" ? Number(header.sell_price) : null,
-            }
-          : {}),
+        items: payloadItems,
+        ...(isAdmin ? { location: header.location || null } : {}),
       };
       await onSubmit(payload);
+      toast.success(isAdmin ? "Send recorded" : "Send recorded — awaiting admin pricing");
       onClose();
     } catch (err) {
       toast.error(getErrorMessage(err, "Failed to record send"));
@@ -1310,391 +1305,266 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks }) {
     }
   };
 
-  const grandUnits = items.reduce((s, it) => s + (Number(it.bags) || 0), 0);
-
   return (
     <form onSubmit={handleSubmit} className="space-y-5">
-      <div className="divider-label">Vehicle & Driver</div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <div className="sm:col-span-2">
-          <label className="label flex items-center gap-1.5">
-            <Truck size={11} /> Vehicle Number *
-          </label>
+      {/* Vehicle */}
+      <div className="space-y-3">
+        <div>
+          <label className="label">Vehicle Number *</label>
           <VehicleNumberInput
             value={header.vehicle_number}
             onChange={(v) => setHeader((h) => ({ ...h, vehicle_number: v }))}
           />
         </div>
-        <div>
-          <label className="label flex items-center gap-1.5">
-            <User size={11} /> Driver Name *
-          </label>
-          <input
-            className="input-field"
-            value={header.driver_name}
-            onChange={(e) => setHeader((h) => ({ ...h, driver_name: e.target.value }))}
-          />
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <div>
+            <label className="label">Driver Name *</label>
+            <input className="input-field" value={header.driver_name}
+              onChange={(e) => setHeader((h) => ({ ...h, driver_name: e.target.value }))}
+              placeholder="Full name" />
+          </div>
+          <div>
+            <label className="label">Driver No. *</label>
+            <DriverNumberInput
+              value={header.driver_number}
+              onChange={(v) => setHeader((h) => ({ ...h, driver_number: v }))}
+            />
+            {header.driver_number && header.driver_number.length !== 10 && (
+              <p className="text-[10px] mt-1 font-medium" style={{ color: "var(--danger)" }}>
+                {header.driver_number.length}/10
+              </p>
+            )}
+          </div>
         </div>
         <div>
-          <label className="label flex items-center gap-1.5">
-            <Phone size={11} /> Driver Number *
-          </label>
-          <DriverNumberInput
-            value={header.driver_number}
-            onChange={(v) => setHeader((h) => ({ ...h, driver_number: v }))}
-          />
-          {header.driver_number && header.driver_number.length !== 10 && (
-            <p className="text-[10px] mt-1 font-medium" style={{ color: "var(--danger)" }}>
-              Must be exactly 10 digits ({header.driver_number.length}/10)
-            </p>
-          )}
-        </div>
-        <div className="sm:col-span-2">
-          <label className="label">Destination / To</label>
-          <input
-            className="input-field"
-            value={header.destination}
+          <label className="label">Destination</label>
+          <input className="input-field" value={header.destination}
             onChange={(e) => setHeader((h) => ({ ...h, destination: e.target.value }))}
-          />
+            placeholder="Where to..." />
         </div>
-        <div className="sm:col-span-2">
+        <div>
           <label className="label">Date & Time</label>
-          <input
-            type="datetime-local"
-            className="input-field"
-            value={header.transaction_date}
-            onChange={(e) => setHeader((h) => ({ ...h, transaction_date: e.target.value }))}
-          />
+          <input type="datetime-local" className="input-field" value={header.transaction_date}
+            onChange={(e) => setHeader((h) => ({ ...h, transaction_date: e.target.value }))} />
         </div>
       </div>
 
+      {/* Admin details */}
       {isAdmin && (
-        <>
-          <div className="divider-label" style={{ color: "var(--accent)" }}>
-            Admin-only
-          </div>
-          <div
-            className="rounded-2xl p-4"
-            style={{
-              backgroundColor: "var(--accent-soft)",
-              border: "1.5px dashed var(--accent-muted)",
-            }}
-          >
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="sm:col-span-2">
-                <label className="label flex items-center gap-1.5">
-                  <User size={11} /> To Whom
-                </label>
-                <input
-                  className="input-field"
-                  value={header.to_whom}
-                  onChange={(e) => setHeader((h) => ({ ...h, to_whom: e.target.value }))}
-                  placeholder="Buyer / Recipient name..."
-                />
-              </div>
-              <div>
-                <label className="label flex items-center gap-1.5">
-                  <MapPin size={11} /> Location
-                </label>
-                <input
-                  className="input-field"
-                  value={header.location}
-                  onChange={(e) => setHeader((h) => ({ ...h, location: e.target.value }))}
-                />
-              </div>
-              <div>
-                <label className="label flex items-center gap-1.5">
-                  <IndianRupee size={11} /> Global Sell Price (fallback)
-                </label>
-                <input
-                  type="number"
-                  step="0.01"
-                  className="input-field"
-                  value={header.sell_price}
-                  onWheel={(e) => e.target.blur()}
-                  onChange={(e) => setHeader((h) => ({ ...h, sell_price: e.target.value }))}
-                  placeholder="0.00"
-                />
-                {items[0] && buyPriceForItem(items[0]) != null && (
-                  <SellPriceIndicator
-                    buyPrice={buyPriceForItem(items[0])}
-                    sellPrice={header.sell_price}
-                  />
-                )}
-              </div>
-            </div>
-          </div>
-        </>
-      )}
-
-      {brandsWithStock.length === 0 && (
-        <div
-          className="rounded-xl p-4 flex items-start gap-3"
-          style={{
-            backgroundColor: "var(--warning-soft)",
-            border: "1.5px solid var(--warning)",
-          }}
-        >
-          <AlertTriangle size={20} style={{ color: "var(--warning)", flexShrink: 0, marginTop: 2 }} />
+        <div className="rounded-2xl p-4 space-y-3"
+          style={{ backgroundColor: "rgba(99,102,241,0.04)", border: "1.5px dashed rgba(99,102,241,0.25)" }}>
+          <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: "#6366f1" }}>Admin Details</p>
           <div>
-            <p className="text-sm font-bold" style={{ color: "var(--warning-text)" }}>
-              No stock available
-            </p>
-            <p className="text-xs mt-1" style={{ color: "var(--warning-text)", opacity: 0.85 }}>
-              You need to record an arrival before you can send stock.
-            </p>
+            <label className="label">To Whom</label>
+            <input className="input-field" value={header.to_whom}
+              onChange={(e) => setHeader((h) => ({ ...h, to_whom: e.target.value }))}
+              placeholder="Buyer / Recipient..." />
+          </div>
+          <div>
+            <label className="label">Location</label>
+            <input className="input-field" value={header.location}
+              onChange={(e) => setHeader((h) => ({ ...h, location: e.target.value }))}
+              placeholder="Location..." />
           </div>
         </div>
       )}
 
-      <div className="divider-label">Items</div>
-      <div className="space-y-4">
-        {items.map((it, idx) => {
-          const availWarehouses = warehousesForBrand(it.brand_id);
-          const availWeights = weightsForItem(it);
-          const maxUnits = maxUnitsForItem(it);
-          const buyPrice = buyPriceForItem(it);
-          const wt = Number(it.bag_weight_kg) || 0;
-          const isPiece = wt > 0 && wt < PIECE_THRESHOLD_KG;
-          const unitLabel = isPiece ? "piece" : "bag";
+      {brandsWithStock.length === 0 && (
+        <div className="rounded-xl p-4" style={{ backgroundColor: "var(--warning-soft)", border: "1.5px solid var(--warning)" }}>
+          <p className="text-sm font-bold" style={{ color: "var(--warning)" }}>No stock available</p>
+          <p className="text-xs mt-0.5 opacity-80" style={{ color: "var(--warning)" }}>Record an arrival first.</p>
+        </div>
+      )}
+
+      {/* Items */}
+      <div className="space-y-3">
+        <p className="text-[10px] font-bold uppercase tracking-wider text-center" style={{ color: "var(--text-muted)" }}>
+          ITEMS TO SEND
+        </p>
+
+        {groups.map((g, gi) => {
+          const availWarehouses = warehousesForGroup(g.brand_id);
+          const availWeights    = weightRowsForGroup(g.brand_id, g.warehouse_id);
 
           return (
-            <div key={idx} className="card animate-scale-in" style={{ padding: 16 }}>
-              <div className="flex items-center justify-between mb-3">
-                <span className="badge badge-danger">Send #{idx + 1}</span>
-                {items.length > 1 && (
-                  <button
-                    type="button"
-                    onClick={() => removeItem(idx)}
-                    className="btn-ghost"
-                    style={{ color: "var(--danger)", padding: "6px 10px" }}
-                  >
-                    <Trash2 size={14} /> Remove
+            <div key={gi} className="rounded-2xl overflow-hidden"
+              style={{ border: "1.5px solid rgba(239,68,68,0.25)", backgroundColor: "var(--bg-card)" }}>
+              <div className="flex items-center justify-between px-3 py-2.5"
+                style={{ backgroundColor: "rgba(239,68,68,0.05)", borderBottom: "1px solid var(--border-light)" }}>
+                <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: "#ef4444" }}>
+                  Send #{gi + 1}
+                </span>
+                {groups.length > 1 && (
+                  <button type="button" onClick={() => removeGroup(gi)}
+                    className="flex items-center gap-1 text-[11px] font-bold px-2 py-1 rounded-lg"
+                    style={{ color: "var(--danger)", backgroundColor: "var(--danger-soft)" }}>
+                    <X size={11} /> Remove
                   </button>
                 )}
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="label">Brand *</label>
-                  <select
-                    className="input-field"
-                    value={it.brand_id}
-                    onChange={(e) =>
-                      updateItem(idx, {
-                        brand_id: e.target.value,
-                        warehouse_id: "",
-                        bag_weight_kg: "",
-                        bags: "",
-                      })
-                    }
-                    disabled={brandsWithStock.length === 0}
-                  >
-                    <option value="">— Select Brand —</option>
-                    {brandsWithStock.map((b) => (
-                      <option key={b.id} value={b.id}>
-                        {i18n.language === "ta" && b.name_ta ? b.name_ta : b.name}
-                      </option>
-                    ))}
-                  </select>
-                  {it.brand_id && availWarehouses.length === 0 && (
-                    <p className="text-[10px] mt-1 font-medium" style={{ color: "var(--danger)" }}>
-                      No warehouses have this brand
-                    </p>
-                  )}
-                </div>
-
-                <div>
-                  <label className="label">Warehouse *</label>
-                  <select
-                    className="input-field"
-                    value={it.warehouse_id}
-                    onChange={(e) =>
-                      updateItem(idx, { warehouse_id: e.target.value, bag_weight_kg: "", bags: "" })
-                    }
-                    disabled={!it.brand_id || availWarehouses.length === 0}
-                  >
-                    <option value="">— Select Warehouse —</option>
-                    {availWarehouses.map((w) => {
-                      const total = warehouseBagTotal(it.brand_id, w.id);
-                      const wName =
-                        i18n.language === "ta" && w.location_name_ta
-                          ? w.location_name_ta
-                          : w.location_name;
-                      return (
+              <div className="p-3 space-y-3">
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                  <div>
+                    <label className="label">Brand *</label>
+                    <select className="input-field" value={g.brand_id}
+                      disabled={brandsWithStock.length === 0}
+                      onChange={(e) => updateGroup(gi, { brand_id: e.target.value, warehouse_id: "", weight_rows: {} })}>
+                      <option value="">— Select —</option>
+                      {brandsWithStock.map((b) => (
+                        <option key={b.id} value={b.id}>
+                          {i18n.language === "ta" && b.name_ta ? b.name_ta : b.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="label">Warehouse *</label>
+                    <select className="input-field" value={g.warehouse_id}
+                      disabled={!g.brand_id}
+                      onChange={(e) => updateGroup(gi, { warehouse_id: e.target.value, weight_rows: {} })}>
+                      <option value="">— Select —</option>
+                      {availWarehouses.map((w) => (
                         <option key={w.id} value={w.id}>
-                          {wName} · {total} avail
+                          {i18n.language === "ta" && w.location_name_ta ? w.location_name_ta : w.location_name}
                         </option>
-                      );
-                    })}
-                  </select>
+                      ))}
+                    </select>
+                  </div>
                 </div>
 
-                <div>
-                  <label className="label">Bag Weight *</label>
-                  <select
-                    className="input-field"
-                    value={it.bag_weight_kg}
-                    onChange={(e) => updateItem(idx, { bag_weight_kg: e.target.value, bags: "" })}
-                    disabled={!it.warehouse_id || availWeights.length === 0}
-                  >
-                    <option value="">— Select Weight —</option>
-                    {availWeights.map((s) => {
-                      const sw = Number(s.bag_weight_kg);
-                      const swQty = Number(s.total_bags ?? s.remaining_bags ?? 0);
-                      const swIsPiece = sw < PIECE_THRESHOLD_KG;
+                {/* Per-weight rows */}
+                {g.warehouse_id && availWeights.length > 0 && (
+                  <div className="space-y-2">
+                    <div style={{ display: "grid", gridTemplateColumns: isAdmin ? "auto 1fr 1fr 1fr" : "auto 1fr 1fr", gap: 8, alignItems: "center" }}>
+                      <div />
+                      <label className="text-[9px] font-bold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>Qty</label>
+                      {isAdmin && (
+                        <label className="text-[9px] font-bold uppercase tracking-wider" style={{ color: "#ef4444" }}>₹ / Unit</label>
+                      )}
+                      <label className="text-[9px] font-bold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>Total</label>
+                    </div>
+
+                    {availWeights.map((wr) => {
+                      const row = g.weight_rows[wr.weight_kg] || { qty: "", selling_price: "" };
+                      const qty = Number(row.qty) || 0;
+                      const sp  = Number(row.selling_price) || 0;
+                      const bp  = wr.last_buy_price;
+                      const diff = sp > 0 && bp != null ? sp - bp : null;
+                      const totalRev = sp > 0 && qty > 0 ? sp * qty : null;
+                      const col = diff == null ? "var(--text-muted)" : diff > 0 ? "var(--success)" : diff < 0 ? "var(--danger)" : "var(--text-muted)";
+                      const unitLabel = wr.isPiece ? "piece" : "bag";
+                      const unitColor = wr.isPiece ? "var(--warning)" : "var(--success)";
+                      const unitBg    = wr.isPiece ? "var(--warning-soft)" : "var(--success-soft)";
+
                       return (
-                        <option key={s.bag_weight_kg} value={s.bag_weight_kg}>
-                          {sw} KG · {swQty} {swIsPiece ? "pcs" : "bags"} avail
-                        </option>
+                        <div key={wr.weight_kg} className="rounded-xl p-2.5 space-y-2"
+                          style={{ backgroundColor: "var(--bg-secondary)", border: "1px solid var(--border-light)" }}>
+                          <div style={{ display: "grid", gridTemplateColumns: isAdmin ? "auto 1fr 1fr 1fr" : "auto 1fr 1fr", gap: 8, alignItems: "center" }}>
+                            <span className="text-[11px] font-bold px-2 py-1 rounded-lg whitespace-nowrap"
+                              style={{ color: unitColor, backgroundColor: unitBg }}>
+                              {wr.weight_kg}KG
+                              <span className="block text-[9px] font-normal opacity-70">
+                                {wr.qty} avail
+                              </span>
+                            </span>
+                            <input type="number" min="0" max={wr.qty} className="input-field"
+                              placeholder={`0–${wr.qty}`}
+                              value={row.qty}
+                              onWheel={(e) => e.target.blur()}
+                              onChange={(e) => updateWeightRow(gi, wr.weight_kg, { qty: e.target.value })} />
+                            {isAdmin && (
+                              <input type="number" min="0" step="0.01" className="input-field"
+                                placeholder={`₹/${unitLabel}`}
+                                value={row.selling_price}
+                                onWheel={(e) => e.target.blur()}
+                                style={{ borderColor: row.selling_price ? "rgba(239,68,68,0.4)" : undefined }}
+                                onChange={(e) => updateWeightRow(gi, wr.weight_kg, { selling_price: e.target.value })} />
+                            )}
+                            <div className="text-right">
+                              {qty > 0 ? (
+                                <>
+                                  <p className="text-[10px] font-bold" style={{ color: "var(--text-primary)" }}>
+                                    {qty} {unitLabel}{qty !== 1 ? "s" : ""}
+                                  </p>
+                                  {totalRev && (
+                                    <p className="text-[10px] font-semibold" style={{ color: "#ef4444" }}>
+                                      ₹{totalRev.toFixed(0)}
+                                    </p>
+                                  )}
+                                </>
+                              ) : (
+                                <p className="text-[10px]" style={{ color: "var(--text-muted)" }}>—</p>
+                              )}
+                            </div>
+                          </div>
+                          {isAdmin && qty > 0 && diff != null && (
+                            <div className="flex items-center gap-2">
+                              {bp != null && <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>Buy: ₹{bp}/{unitLabel}</span>}
+                              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded"
+                                style={{ color: col, backgroundColor: diff > 0 ? "var(--success-soft)" : "var(--danger-soft)" }}>
+                                {diff > 0 ? "+" : ""}{diff.toFixed(2)}/{unitLabel}
+                              </span>
+                              <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+                                P&L: ₹{(diff * qty).toFixed(0)}
+                              </span>
+                            </div>
+                          )}
+                        </div>
                       );
                     })}
-                  </select>
-                  {it.bag_weight_kg && (
-                    <p
-                      className="text-[10px] mt-1 font-bold flex items-center gap-1"
-                      style={{ color: isPiece ? "var(--warning)" : "var(--success)" }}
-                    >
-                      {isPiece ? <Layers size={10} /> : <Box size={10} />}
-                      {isPiece ? "Loose piece" : "Standard bag"}
-                    </p>
-                  )}
-                </div>
+                  </div>
+                )}
 
-                <div>
-                  <label className="label">
-                    {unitLabel.charAt(0).toUpperCase() + unitLabel.slice(1)}s *
-                  </label>
-                  <input
-                    type="number"
-                    min="1"
-                    max={maxUnits || undefined}
-                    className="input-field"
-                    value={it.bags}
-                    onWheel={(e) => e.target.blur()}
-                    onChange={(e) => updateItem(idx, { bags: e.target.value })}
-                    disabled={!it.bag_weight_kg}
-                    placeholder={maxUnits > 0 ? `1 to ${maxUnits}` : "—"}
-                  />
-                  {it.bag_weight_kg && maxUnits > 0 && (
-                    <p className="text-[10px] mt-1 font-medium" style={{ color: "var(--text-muted)" }}>
-                      Max available: {maxUnits} {unitLabel}{maxUnits !== 1 ? "s" : ""}
-                    </p>
-                  )}
-                  {it.bags && Number(it.bags) > maxUnits && maxUnits > 0 && (
-                    <p className="text-[10px] mt-1 font-medium" style={{ color: "var(--danger)" }}>
-                      ⚠ Exceeds available stock ({maxUnits})
-                    </p>
-                  )}
-                </div>
+                {g.warehouse_id && availWeights.length === 0 && (
+                  <p className="text-xs py-2" style={{ color: "var(--text-muted)" }}>No weight details found.</p>
+                )}
               </div>
-
-              {/* Per-item selling price (admin) */}
-              {isAdmin && (
-                <div
-                  className="mt-3 p-3 rounded-xl space-y-1.5"
-                  style={{ backgroundColor: "rgba(239,68,68,0.04)", border: "1.5px solid rgba(239,68,68,0.2)" }}
-                >
-                  <label className="text-[9px] font-bold uppercase tracking-wider flex items-center gap-1" style={{ color: "#ef4444" }}>
-                    <IndianRupee size={10} /> Selling Price / {it.bag_weight_kg && Number(it.bag_weight_kg) < 25 ? "piece" : "bag"} *
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    className="input-field"
-                    value={it.selling_price}
-                    onWheel={(e) => e.target.blur()}
-                    onChange={(e) => updateItem(idx, { selling_price: e.target.value })}
-                    placeholder="e.g. 1600.00"
-                  />
-                  {it.selling_price !== "" && Number(it.selling_price) > 0 && (() => {
-                    const sp = Number(it.selling_price);
-                    const diff = buyPrice != null ? sp - buyPrice : null;
-                    const col = diff == null ? "var(--text-muted)" : diff > 0 ? "var(--success)" : diff < 0 ? "var(--danger)" : "var(--text-muted)";
-                    const bg  = diff == null ? "var(--bg-secondary)" : diff > 0 ? "var(--success-soft)" : diff < 0 ? "var(--danger-soft)" : "var(--bg-secondary)";
-                    return (
-                      <div className="flex items-center gap-2 flex-wrap">
-                        {buyPrice != null && <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>Buy: ₹{buyPrice}</span>}
-                        {diff != null && (
-                          <span className="text-[10px] font-bold px-2 py-0.5 rounded" style={{ color: col, backgroundColor: bg }}>
-                            {diff > 0 ? "+" : ""}{diff.toFixed(2)}/unit
-                          </span>
-                        )}
-                        {it.bags && Number(it.bags) > 0 && (
-                          <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
-                            Total: ₹{(sp * Number(it.bags)).toFixed(2)}
-                          </span>
-                        )}
-                      </div>
-                    );
-                  })()}
-                </div>
-              )}
             </div>
           );
         })}
 
-        <button
-          type="button"
-          onClick={addItem}
-          className="btn-outline-accent w-full"
-          disabled={brandsWithStock.length === 0}
-        >
-          <Plus size={16} /> Add another item
+        <button type="button" onClick={addGroup} disabled={brandsWithStock.length === 0}
+          className="flex items-center justify-center gap-2 w-full rounded-xl"
+          style={{
+            padding: "11px 16px", backgroundColor: "var(--bg-card)",
+            border: "2px dashed var(--border)", color: "var(--danger)",
+            fontSize: 13, fontWeight: 700, cursor: "pointer",
+            opacity: brandsWithStock.length === 0 ? 0.4 : 1,
+          }}>
+          <Plus size={15} /> Add another brand / warehouse
         </button>
       </div>
 
-      <div
-        className="card-accent"
-        style={{
-          padding: "16px 20px",
-          background: "linear-gradient(135deg, #ef4444, #dc2626, #b91c1c)",
-        }}
-      >
-        <div className="relative flex items-center justify-between">
+      {grandUnits > 0 && (
+        <div className="rounded-2xl p-4 flex items-center justify-between"
+          style={{ backgroundColor: "#ef4444", color: "#fff" }}>
           <div>
-            <p className="text-[10px] font-semibold text-white/70 uppercase tracking-wider">
-              Total Dispatch
-            </p>
-            <p className="text-2xl font-extrabold text-white mt-1 tracking-tight">
-              {grandUnits}{" "}
-              <span className="text-sm font-medium text-white/70">unit{grandUnits !== 1 ? "s" : ""}</span>
-            </p>
+            <p className="text-[10px] font-semibold text-white/70 uppercase tracking-wider">Total Dispatch</p>
+            <p className="text-2xl font-extrabold mt-1">{grandUnits} <span className="text-sm font-medium text-white/70">units</span></p>
           </div>
-          <ArrowUpFromLine size={28} className="text-white/70" />
+          <ArrowUpFromLine size={28} style={{ opacity: 0.7 }} />
         </div>
-      </div>
+      )}
 
       <div>
         <label className="label">Notes</label>
-        <textarea
-          className="input-field"
-          style={{ minHeight: 60 }}
-          value={header.notes}
+        <textarea className="input-field" style={{ minHeight: 60 }} value={header.notes}
           onChange={(e) => setHeader((h) => ({ ...h, notes: e.target.value }))}
-        />
+          placeholder="Additional notes..." />
       </div>
 
-      <div className="flex gap-3 pt-2">
-        <button type="button" onClick={onClose} className="btn-secondary flex-1">
-          {t("common.cancel")}
-        </button>
-        <button
-          type="submit"
-          disabled={loading || brandsWithStock.length === 0}
-          className="btn-danger flex-1"
-        >
-          {loading ? t("common.loading") : "Record Send"}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <button type="button" onClick={onClose} className="btn-secondary">Cancel</button>
+        <button type="submit" disabled={loading || brandsWithStock.length === 0} className="btn-primary">
+          {loading ? "Sending…" : "Send Stock"}
         </button>
       </div>
     </form>
   );
 }
 
-/* ══════════════════════════════════════════════════════════
-   SKELETON
-   ══════════════════════════════════════════════════════════ */
+
 function DashboardSkeleton() {
   return (
     <div className="space-y-5 animate-fade-in">

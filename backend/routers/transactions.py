@@ -216,16 +216,32 @@ def _apply_outbound_to_stock(
     bags: int,
     weight_kg: float,
 ):
-    """Decrement stock totals (raises if insufficient)."""
+    """Decrement stock totals and weight_breakdowns (raises if insufficient)."""
+    # Find the stock row that covers this exact weight
+    # bag_size == weight_kg for non-pooled weights; for pooled pieces bag_size may differ
     stock = (
         db.query(Stock)
         .filter(
             Stock.brand_id == brand_id,
             Stock.warehouse_id == warehouse_id,
-            Stock.bag_weight_kg == bag_size,
+        )
+        .filter(
+            # Match by the actual weight if possible, else by bag_weight_kg
+            (Stock.bag_weight_kg == bag_size) | (Stock.bag_weight_kg == weight_kg)
         )
         .first()
     )
+    if not stock:
+        # Last resort: any active stock for this brand/warehouse
+        stock = (
+            db.query(Stock)
+            .filter(
+                Stock.brand_id == brand_id,
+                Stock.warehouse_id == warehouse_id,
+                Stock.is_active == True,
+            )
+            .first()
+        )
     if not stock or (stock.total_bags or 0) < bags:
         available = stock.total_bags if stock else 0
         raise HTTPException(
@@ -235,6 +251,18 @@ def _apply_outbound_to_stock(
         )
     stock.total_bags -= bags
     stock.total_weight_kg = max(0.0, (stock.total_weight_kg or 0.0) - weight_kg)
+
+    # Also decrement the matching weight_breakdown row
+    breakdown = (
+        db.query(StockWeightBreakdown)
+        .filter(
+            StockWeightBreakdown.stock_id == stock.id,
+            StockWeightBreakdown.weight_kg == weight_kg,
+        )
+        .first()
+    )
+    if breakdown:
+        breakdown.quantity = max(0, (breakdown.quantity or 0) - bags)
 
 
 def _compute_profit_loss(price: Optional[float], sell_price: Optional[float], bags: int) -> Optional[float]:
