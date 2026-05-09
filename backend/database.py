@@ -47,13 +47,24 @@ if IS_SQLITE:
     if ":memory:" in DATABASE_URL:
         ENGINE_KWARGS["poolclass"] = StaticPool
 else:
-    # Postgres / MySQL etc.
+    # Postgres / Supabase PgBouncer (transaction mode)
+    # prepared_statement_cache_size=0 disables server-side prepared statements
+    # which are NOT supported when PgBouncer runs in transaction pooling mode.
+    _connect_args = {}
+    if "pgbouncer=true" in DATABASE_URL or os.getenv("PGBOUNCER", "0") == "1":
+        _connect_args = {
+            "prepared_statement_cache_size": 0,  # psycopg2 kwarg via SQLAlchemy
+            "options": "-c statement_timeout=30000",
+        }
+        logger.info("PgBouncer mode detected — prepared statement cache disabled")
+
     ENGINE_KWARGS.update({
-        "pool_pre_ping": True,        # avoid stale connections
-        "pool_size": int(os.getenv("DB_POOL_SIZE", "5")),
-        "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "10")),
-        "pool_recycle": int(os.getenv("DB_POOL_RECYCLE", "1800")),  # recycle after 30 min
+        "pool_pre_ping": True,
+        "pool_size": int(os.getenv("DB_POOL_SIZE", "3")),       # keep low for free-tier
+        "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "5")),
+        "pool_recycle": int(os.getenv("DB_POOL_RECYCLE", "1800")),
         "pool_timeout": int(os.getenv("DB_POOL_TIMEOUT", "30")),
+        "connect_args": _connect_args,
     })
 
 engine = create_engine(DATABASE_URL, **ENGINE_KWARGS)

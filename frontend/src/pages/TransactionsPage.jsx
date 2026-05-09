@@ -756,48 +756,60 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
     notes: "",
   });
 
-  // One "group" per brand+warehouse selection.
-  // weight_rows: { [weight_kg]: { qty: "", selling_price: "" } }
-  const blankGroup = () => ({ brand_id: "", warehouse_id: "", weight_rows: {} });
+  const blankGroup = () => ({ brand_id: "", warehouse_id: "", weight_entries: [] });
   const [groups, setGroups] = useState([blankGroup()]);
   const [loading, setLoading] = useState(false);
 
   const addGroup    = () => setGroups(p => [...p, blankGroup()]);
-  const removeGroup = (i) => setGroups(p => p.filter((_, idx) => idx !== i));
-  const updateGroup = (i, patch) => setGroups(p => p.map((g, idx) => idx === i ? { ...g, ...patch } : g));
-  const updateWeightRow = (gi, wkg, patch) =>
-    setGroups(p => p.map((g, idx) => idx !== gi ? g : {
-      ...g,
-      weight_rows: { ...g.weight_rows, [wkg]: { ...(g.weight_rows[wkg] || { qty: "", selling_price: "" }), ...patch } }
+  const removeGroup = gi => setGroups(p => p.filter((_, i) => i !== gi));
+  const updateGroup = (gi, patch) =>
+    setGroups(p => p.map((g, i) => i === gi ? { ...g, ...patch } : g));
+
+  const addWeightEntry = (gi, wkg) =>
+    setGroups(p => p.map((g, i) => {
+      if (i !== gi) return g;
+      if (g.weight_entries.some(e => e.weight_kg === wkg)) return g;
+      return { ...g, weight_entries: [...g.weight_entries, { weight_kg: wkg, qty: "", selling_price: "" }] };
     }));
 
-  // Stocks that have remaining quantity
-  const stocksWithQty = useMemo(() =>
-    stocks.filter(s => (s.remaining_bags ?? s.total_bags ?? 0) > 0), [stocks]);
+  const removeWeightEntry = (gi, wkg) =>
+    setGroups(p => p.map((g, i) =>
+      i !== gi ? g : { ...g, weight_entries: g.weight_entries.filter(e => e.weight_kg !== wkg) }
+    ));
+
+  const updateWeightEntry = (gi, wkg, patch) =>
+    setGroups(p => p.map((g, i) =>
+      i !== gi ? g : {
+        ...g,
+        weight_entries: g.weight_entries.map(e => e.weight_kg === wkg ? { ...e, ...patch } : e)
+      }
+    ));
+
+  const stocksWithQty = useMemo(
+    () => stocks.filter(s => (s.remaining_bags ?? s.total_bags ?? 0) > 0), [stocks]);
 
   const brandsWithStock = useMemo(() => {
     const bIds = new Set(stocksWithQty.map(s => String(s.brand_id ?? s.brand?.id)));
     return brands.filter(b => bIds.has(String(b.id)));
   }, [brands, stocksWithQty]);
 
-  const warehousesForGroup = (brandId) => {
+  const warehousesForGroup = brandId => {
     if (!brandId) return [];
-    const wIds = new Set(stocksWithQty
-      .filter(s => String(s.brand_id ?? s.brand?.id) === String(brandId))
-      .map(s => s.warehouse_id ?? s.warehouse?.id));
+    const wIds = new Set(
+      stocksWithQty
+        .filter(s => String(s.brand_id ?? s.brand?.id) === String(brandId))
+        .map(s => s.warehouse_id ?? s.warehouse?.id)
+    );
     return warehouses.filter(w => wIds.has(w.id));
   };
 
-  // Get the actual per-weight rows for a brand+warehouse from weight_breakdowns
-  // Falls back to the stock's bag_weight_kg if no breakdowns
   const weightRowsForGroup = (brandId, warehouseId) => {
     if (!brandId || !warehouseId) return [];
-    const matchingStocks = stocksWithQty.filter(s =>
-      String(s.brand_id ?? s.brand?.id) === String(brandId) &&
-      String(s.warehouse_id ?? s.warehouse?.id) === String(warehouseId)
+    const matchingStocks = stocksWithQty.filter(
+      s => String(s.brand_id ?? s.brand?.id) === String(brandId) &&
+           String(s.warehouse_id ?? s.warehouse?.id) === String(warehouseId)
     );
-    // Collect all weight_breakdowns across matching stocks (one stock per bag_weight_kg)
-    const weightMap = new Map(); // weight_kg -> { qty, stockBagWeightKg, last_buy_price }
+    const weightMap = new Map();
     for (const s of matchingStocks) {
       const remaining = s.remaining_bags ?? s.total_bags ?? 0;
       if (s.weight_breakdowns && s.weight_breakdowns.length > 0) {
@@ -806,18 +818,15 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
           weightMap.set(wb.weight_kg, {
             weight_kg: wb.weight_kg,
             qty: (weightMap.get(wb.weight_kg)?.qty || 0) + wb.quantity,
-            stockBagWeightKg: s.bag_weight_kg,
             last_buy_price: s.last_buy_price ?? null,
             isPiece: wb.weight_kg < 25,
           });
         }
       } else if (remaining > 0) {
-        // No breakdown rows — fall back to the stock's own bag_weight_kg
         const wkg = s.bag_weight_kg;
         weightMap.set(wkg, {
           weight_kg: wkg,
           qty: (weightMap.get(wkg)?.qty || 0) + remaining,
-          stockBagWeightKg: wkg,
           last_buy_price: s.last_buy_price ?? null,
           isPiece: wkg < 25,
         });
@@ -826,52 +835,38 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
     return Array.from(weightMap.values()).sort((a, b) => b.weight_kg - a.weight_kg);
   };
 
-  // For validation: get max qty for a specific weight in a group
-  const maxForWeight = (brandId, warehouseId, wkg) => {
-    const rows = weightRowsForGroup(brandId, warehouseId);
-    return rows.find(r => r.weight_kg === wkg)?.qty || 0;
-  };
+  const grandUnits = groups.reduce(
+    (sum, g) => sum + g.weight_entries.reduce((s, e) => s + (Number(e.qty) || 0), 0), 0);
 
-  // Total dispatch units across all groups
-  const grandUnits = groups.reduce((sum, g) =>
-    sum + Object.values(g.weight_rows).reduce((s, r) => s + (Number(r.qty) || 0), 0), 0);
-
-  const handleSubmit = async (e) => {
+  const handleSubmit = async e => {
     e.preventDefault();
     if (!header.vehicle_number || !header.driver_name || !header.driver_number)
       return toast.error("Vehicle, driver name & number required");
     if (header.driver_number.length !== 10) return toast.error("Driver number must be 10 digits");
 
-    // Expand groups × weight_rows into flat payload items
     const payloadItems = [];
     for (let gi = 0; gi < groups.length; gi++) {
       const g = groups[gi];
       if (!g.brand_id) return toast.error(`Send #${gi + 1}: Select a brand`);
       if (!g.warehouse_id) return toast.error(`Send #${gi + 1}: Select a warehouse`);
-
+      if (g.weight_entries.length === 0) return toast.error(`Send #${gi + 1}: Add at least one weight`);
       const availWeights = weightRowsForGroup(g.brand_id, g.warehouse_id);
-      let hasAnyQty = false;
-
-      for (const wr of availWeights) {
-        const row = g.weight_rows[wr.weight_kg] || {};
-        const qty = Number(row.qty) || 0;
-        if (qty <= 0) continue;
-        hasAnyQty = true;
-        const max = maxForWeight(g.brand_id, g.warehouse_id, wr.weight_kg);
-        if (qty > max) return toast.error(`Send #${gi + 1} · ${wr.weight_kg}KG: Exceeds available (${max})`);
-        if (isAdmin && (!row.selling_price || Number(row.selling_price) <= 0))
-          return toast.error(`Send #${gi + 1} · ${wr.weight_kg}KG: Enter selling price`);
+      for (const entry of g.weight_entries) {
+        const qty = Number(entry.qty) || 0;
+        if (qty <= 0) return toast.error(`Send #${gi + 1} · ${entry.weight_kg}KG: Enter quantity`);
+        const avail = availWeights.find(w => w.weight_kg === entry.weight_kg);
+        if (qty > (avail?.qty || 0)) return toast.error(`Send #${gi + 1} · ${entry.weight_kg}KG: Exceeds available (${avail?.qty || 0})`);
+        if (isAdmin && (!entry.selling_price || Number(entry.selling_price) <= 0))
+          return toast.error(`Send #${gi + 1} · ${entry.weight_kg}KG: Enter selling price`);
         payloadItems.push({
           brand_id: Number(g.brand_id),
           warehouse_id: Number(g.warehouse_id),
-          bag_weight_kg: wr.weight_kg,
+          bag_weight_kg: entry.weight_kg,
           bags: qty,
-          ...(isAdmin && row.selling_price ? { selling_price: Number(row.selling_price) } : {}),
+          ...(isAdmin && entry.selling_price ? { selling_price: Number(entry.selling_price) } : {}),
         });
       }
-      if (!hasAnyQty) return toast.error(`Send #${gi + 1}: Enter quantity for at least one weight`);
     }
-
     if (payloadItems.length === 0) return toast.error("No items to send");
 
     setLoading(true);
@@ -889,7 +884,7 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
         ...(isAdmin ? { location: header.location || null } : {}),
       };
       await onSubmit(payload);
-      toast.success(isAdmin ? "Send recorded" : "Send recorded — sent for admin review");
+      toast.success(isAdmin ? "Send recorded" : "Send recorded — awaiting admin pricing");
       onClose();
     } catch (err) { toast.error(getErrorMessage(err, "Failed to record send")); }
     finally { setLoading(false); }
@@ -953,7 +948,6 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
         </div>
       )}
 
-      {/* No stock warning */}
       {brandsWithStock.length === 0 && (
         <div className="rounded-xl p-4 flex items-start gap-3"
           style={{ backgroundColor: "var(--warning-soft)", border: "1.5px solid var(--warning)" }}>
@@ -970,14 +964,15 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
         <SectionLabel>{i18n.language === "ta" ? "அனுப்பும் சரக்கு" : "Items to Send"}</SectionLabel>
         <div className="space-y-3">
           {groups.map((g, gi) => {
-            const availWarehouses = warehousesForGroup(g.brand_id);
-            const availWeights    = weightRowsForGroup(g.brand_id, g.warehouse_id);
+            const availWarehouses  = warehousesForGroup(g.brand_id);
+            const availWeights     = weightRowsForGroup(g.brand_id, g.warehouse_id);
+            const addedWkgs        = new Set(g.weight_entries.map(e => e.weight_kg));
+            const remainingWeights = availWeights.filter(w => !addedWkgs.has(w.weight_kg));
 
             return (
               <div key={gi} className="rounded-2xl overflow-hidden"
                 style={{ border: "1.5px solid rgba(239,68,68,0.25)", backgroundColor: "var(--bg-card)" }}>
 
-                {/* Group header */}
                 <div className="flex items-center justify-between px-3 py-2.5"
                   style={{ backgroundColor: "rgba(239,68,68,0.05)", borderBottom: "1px solid var(--border-light)" }}>
                   <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: "#ef4444" }}>
@@ -999,7 +994,7 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
                       <label className="label">Brand *</label>
                       <select className="input-field" value={g.brand_id}
                         disabled={brandsWithStock.length === 0}
-                        onChange={e => updateGroup(gi, { brand_id: e.target.value, warehouse_id: "", weight_rows: {} })}>
+                        onChange={e => updateGroup(gi, { brand_id: e.target.value, warehouse_id: "", weight_entries: [] })}>
                         <option value="">— Select —</option>
                         {brandsWithStock.map(b => (
                           <option key={b.id} value={b.id}>
@@ -1012,7 +1007,7 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
                       <label className="label">Warehouse *</label>
                       <select className="input-field" value={g.warehouse_id}
                         disabled={!g.brand_id}
-                        onChange={e => updateGroup(gi, { warehouse_id: e.target.value, weight_rows: {} })}>
+                        onChange={e => updateGroup(gi, { warehouse_id: e.target.value, weight_entries: [] })}>
                         <option value="">— Select —</option>
                         {availWarehouses.map(w => (
                           <option key={w.id} value={w.id}>
@@ -1023,110 +1018,104 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
                     </div>
                   </div>
 
-                  {/* Per-weight rows */}
-                  {g.warehouse_id && availWeights.length > 0 && (
-                    <div className="space-y-2">
-                      {/* Column headers */}
-                      <div style={{ display: "grid", gridTemplateColumns: isAdmin ? "auto 1fr 1fr 1fr" : "auto 1fr 1fr", gap: 8, alignItems: "center" }}>
-                        <div />
-                        <label className="text-[9px] font-bold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
-                          Qty
-                        </label>
-                        {isAdmin && (
-                          <label className="text-[9px] font-bold uppercase tracking-wider" style={{ color: "#ef4444" }}>
-                            ₹ / Unit
-                          </label>
-                        )}
-                        <label className="text-[9px] font-bold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>
-                          Total
-                        </label>
-                      </div>
+                  {/* Added weight entries */}
+                  {g.weight_entries.map(entry => {
+                    const avail    = availWeights.find(w => w.weight_kg === entry.weight_kg);
+                    const qty      = Number(entry.qty) || 0;
+                    const sp       = Number(entry.selling_price) || 0;
+                    const bp       = avail?.last_buy_price;
+                    const diff     = sp > 0 && bp != null ? sp - bp : null;
+                    const isPiece  = avail?.isPiece ?? entry.weight_kg < 25;
+                    const unitLbl  = isPiece ? "piece" : "bag";
+                    const uColor   = isPiece ? "var(--warning)" : "var(--success)";
+                    const uBg      = isPiece ? "var(--warning-soft)" : "var(--success-soft)";
+                    const col      = diff == null ? "var(--text-muted)" : diff > 0 ? "var(--success)" : "var(--danger)";
 
-                      {availWeights.map(wr => {
-                        const row = g.weight_rows[wr.weight_kg] || { qty: "", selling_price: "" };
-                        const qty = Number(row.qty) || 0;
-                        const sp  = Number(row.selling_price) || 0;
-                        const bp  = wr.last_buy_price;
-                        const diff = sp > 0 && bp != null ? sp - bp : null;
-                        const totalRev = sp > 0 && qty > 0 ? sp * qty : null;
-                        const col = diff == null ? "var(--text-muted)" : diff > 0 ? "var(--success)" : diff < 0 ? "var(--danger)" : "var(--text-muted)";
-                        const unitLabel = wr.isPiece ? "piece" : "bag";
-                        const unitColor = wr.isPiece ? "var(--warning)" : "var(--success)";
-                        const unitBg    = wr.isPiece ? "var(--warning-soft)" : "var(--success-soft)";
+                    return (
+                      <div key={entry.weight_kg} className="rounded-xl p-3 space-y-2"
+                        style={{ backgroundColor: "var(--bg-secondary)", border: "1px solid var(--border-light)" }}>
+                        <div className="flex items-center justify-between">
+                          <span className="text-[12px] font-bold px-2.5 py-1 rounded-lg"
+                            style={{ color: uColor, backgroundColor: uBg }}>
+                            {entry.weight_kg} KG · {unitLbl}
+                            {avail && <span className="ml-1.5 text-[10px] opacity-70">({avail.qty} avail)</span>}
+                          </span>
+                          <button type="button" onClick={() => removeWeightEntry(gi, entry.weight_kg)}
+                            className="p-1.5 rounded-lg" style={{ color: "var(--text-muted)" }}>
+                            <X size={14} />
+                          </button>
+                        </div>
 
-                        return (
-                          <div key={wr.weight_kg} className="rounded-xl p-2.5 space-y-2"
-                            style={{ backgroundColor: "var(--bg-secondary)", border: "1px solid var(--border-light)" }}>
-
-                            {/* Weight label + row inputs */}
-                            <div style={{ display: "grid", gridTemplateColumns: isAdmin ? "auto 1fr 1fr 1fr" : "auto 1fr 1fr", gap: 8, alignItems: "center" }}>
-                              {/* Weight badge */}
-                              <span className="text-[11px] font-bold px-2 py-1 rounded-lg whitespace-nowrap"
-                                style={{ color: unitColor, backgroundColor: unitBg }}>
-                                {wr.weight_kg}KG
-                                <span className="block text-[9px] font-normal opacity-70">
-                                  {wr.qty} {unitLabel}{wr.qty !== 1 ? "s" : ""}
-                                </span>
-                              </span>
-
-                              {/* Qty input */}
-                              <input type="number" min="0" max={wr.qty} className="input-field"
-                                placeholder={`0–${wr.qty}`}
-                                value={row.qty}
-                                onWheel={e => e.target.blur()}
-                                onChange={e => updateWeightRow(gi, wr.weight_kg, { qty: e.target.value })} />
-
-                              {/* Selling price input (admin only) */}
-                              {isAdmin && (
-                                <input type="number" min="0" step="0.01" className="input-field"
-                                  placeholder={`₹/${unitLabel}`}
-                                  value={row.selling_price}
-                                  onWheel={e => e.target.blur()}
-                                  style={{ borderColor: row.selling_price ? "rgba(239,68,68,0.4)" : undefined }}
-                                  onChange={e => updateWeightRow(gi, wr.weight_kg, { selling_price: e.target.value })} />
-                              )}
-
-                              {/* Total / P&L */}
-                              <div className="text-right">
-                                {qty > 0 ? (
-                                  <>
-                                    <p className="text-[10px] font-bold" style={{ color: "var(--text-primary)" }}>
-                                      {qty} {unitLabel}{qty !== 1 ? "s" : ""}
-                                    </p>
-                                    {totalRev && (
-                                      <p className="text-[10px] font-semibold" style={{ color: "#ef4444" }}>
-                                        ₹{totalRev.toFixed(0)}
-                                      </p>
-                                    )}
-                                  </>
-                                ) : (
-                                  <p className="text-[10px]" style={{ color: "var(--text-muted)" }}>—</p>
-                                )}
-                              </div>
+                        <div style={{ display: "grid", gridTemplateColumns: isAdmin ? "1fr 1fr" : "1fr", gap: 8 }}>
+                          <div>
+                            <label className="label text-[10px]">Quantity {avail ? `(max ${avail.qty})` : ""}</label>
+                            <input type="number" min="0" max={avail?.qty} className="input-field"
+                              value={entry.qty} onWheel={e => e.target.blur()}
+                              onChange={e => updateWeightEntry(gi, entry.weight_kg, { qty: e.target.value })}
+                              placeholder="0" />
+                          </div>
+                          {isAdmin && (
+                            <div>
+                              <label className="label text-[10px]" style={{ color: "#ef4444" }}>
+                                ₹ / {unitLbl} *
+                              </label>
+                              <input type="number" min="0" step="0.01" className="input-field"
+                                value={entry.selling_price} onWheel={e => e.target.blur()}
+                                style={{ borderColor: entry.selling_price ? "rgba(239,68,68,0.5)" : undefined }}
+                                onChange={e => updateWeightEntry(gi, entry.weight_kg, { selling_price: e.target.value })}
+                                placeholder="0.00" />
                             </div>
+                          )}
+                        </div>
 
-                            {/* P&L badge */}
-                            {isAdmin && qty > 0 && diff != null && (
-                              <div className="flex items-center gap-2">
-                                {bp != null && <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>Buy: ₹{bp}/{unitLabel}</span>}
-                                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded"
-                                  style={{ color: col, backgroundColor: diff > 0 ? "var(--success-soft)" : "var(--danger-soft)" }}>
-                                  {diff > 0 ? "+" : ""}{diff.toFixed(2)}/{unitLabel}
-                                </span>
-                                <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
-                                  P&L: ₹{(diff * qty).toFixed(0)}
-                                </span>
-                              </div>
+                        {qty > 0 && (
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-[11px] font-bold" style={{ color: "var(--text-primary)" }}>
+                              {qty} {unitLbl}{qty !== 1 ? "s" : ""}
+                            </span>
+                            {sp > 0 && (
+                              <span className="text-[11px] font-semibold" style={{ color: "#ef4444" }}>
+                                = ₹{(sp * qty).toFixed(0)}
+                              </span>
+                            )}
+                            {isAdmin && diff != null && (
+                              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded"
+                                style={{ color: col, backgroundColor: diff > 0 ? "var(--success-soft)" : "var(--danger-soft)" }}>
+                                {diff > 0 ? "+" : ""}{diff.toFixed(2)}/{unitLbl} · P&L ₹{(diff * qty).toFixed(0)}
+                              </span>
                             )}
                           </div>
-                        );
-                      })}
+                        )}
+                      </div>
+                    );
+                  })}
+
+                  {/* Add Weight chips */}
+                  {g.warehouse_id && remainingWeights.length > 0 && (
+                    <div className="space-y-1.5">
+                      <p className="text-[10px] font-semibold" style={{ color: "var(--text-muted)" }}>+ Add weight:</p>
+                      <div className="flex flex-wrap gap-2">
+                        {remainingWeights.map(wr => (
+                          <button key={wr.weight_kg} type="button"
+                            onClick={() => addWeightEntry(gi, wr.weight_kg)}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[12px] font-bold transition-all"
+                            style={{
+                              backgroundColor: wr.isPiece ? "var(--warning-soft)" : "var(--success-soft)",
+                              color: wr.isPiece ? "var(--warning)" : "var(--success)",
+                              border: `1.5px solid ${wr.isPiece ? "rgba(245,158,11,0.3)" : "rgba(16,185,129,0.3)"}`,
+                            }}>
+                            <Plus size={12} />
+                            {wr.weight_kg} KG
+                            <span className="text-[10px] opacity-70">({wr.qty})</span>
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   )}
 
                   {g.warehouse_id && availWeights.length === 0 && (
-                    <p className="text-xs py-2" style={{ color: "var(--text-muted)" }}>
-                      No stock with weight details found for this warehouse.
+                    <p className="text-xs py-2 text-center" style={{ color: "var(--text-muted)" }}>
+                      No stock found for this warehouse.
                     </p>
                   )}
                 </div>
@@ -1141,27 +1130,25 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
               border: "2px dashed var(--border)", color: "var(--danger)",
               fontSize: 13, fontWeight: 700, cursor: "pointer",
               opacity: brandsWithStock.length === 0 ? 0.4 : 1,
-            }}
-            onMouseEnter={e => { if (brandsWithStock.length > 0) { e.currentTarget.style.borderColor = "#ef4444"; e.currentTarget.style.backgroundColor = "var(--danger-soft)"; }}}
-            onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--border)"; e.currentTarget.style.backgroundColor = "var(--bg-card)"; }}>
+            }}>
             <Plus size={15} /> Add another brand / warehouse
           </button>
         </div>
       </div>
 
-      {/* Grand total */}
       {grandUnits > 0 && (
         <div className="rounded-2xl p-4 flex items-center justify-between"
           style={{ backgroundColor: "#ef4444", color: "#fff" }}>
           <div>
             <p className="text-[10px] font-semibold text-white/70 uppercase tracking-wider">Total Dispatch</p>
-            <p className="text-2xl font-extrabold mt-1">{grandUnits} <span className="text-sm font-medium text-white/70">units</span></p>
+            <p className="text-2xl font-extrabold mt-1">{grandUnits}
+              <span className="text-sm font-medium text-white/70 ml-2">units</span>
+            </p>
           </div>
           <ArrowUpFromLine size={28} style={{ opacity: 0.7 }} />
         </div>
       )}
 
-      {/* Notes */}
       <div>
         <label className="label">Notes</label>
         <textarea className="input-field" style={{ minHeight: 60 }} value={header.notes}
