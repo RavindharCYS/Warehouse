@@ -25,6 +25,14 @@ if not DATABASE_URL or "railway.internal" in DATABASE_URL:
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
+# Strip ?pgbouncer=true — psycopg2 does not understand this query param.
+# PgBouncer compatibility is handled via SQLAlchemy engine options below.
+if "pgbouncer" in DATABASE_URL:
+    from urllib.parse import urlparse, urlencode, parse_qs, urlunparse
+    _parsed = urlparse(DATABASE_URL)
+    _qs = {k: v for k, v in parse_qs(_parsed.query).items() if k != "pgbouncer"}
+    DATABASE_URL = urlunparse(_parsed._replace(query=urlencode(_qs, doseq=True)))
+
 # Optional: force psycopg driver if you've installed it (Postgres 17+)
 # if DATABASE_URL.startswith("postgresql://") and os.getenv("USE_PSYCOPG3") == "1":
 #     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
@@ -47,24 +55,13 @@ if IS_SQLITE:
     if ":memory:" in DATABASE_URL:
         ENGINE_KWARGS["poolclass"] = StaticPool
 else:
-    # Postgres / Supabase PgBouncer (transaction mode)
-    # prepared_statement_cache_size=0 disables server-side prepared statements
-    # which are NOT supported when PgBouncer runs in transaction pooling mode.
-    _connect_args = {}
-    if "pgbouncer=true" in DATABASE_URL or os.getenv("PGBOUNCER", "0") == "1":
-        _connect_args = {
-            "prepared_statement_cache_size": 0,  # psycopg2 kwarg via SQLAlchemy
-            "options": "-c statement_timeout=30000",
-        }
-        logger.info("PgBouncer mode detected — prepared statement cache disabled")
-
+    # Postgres / MySQL etc.
     ENGINE_KWARGS.update({
-        "pool_pre_ping": True,
-        "pool_size": int(os.getenv("DB_POOL_SIZE", "3")),       # keep low for free-tier
-        "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "5")),
-        "pool_recycle": int(os.getenv("DB_POOL_RECYCLE", "1800")),
+        "pool_pre_ping": True,        # avoid stale connections
+        "pool_size": int(os.getenv("DB_POOL_SIZE", "5")),
+        "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "10")),
+        "pool_recycle": int(os.getenv("DB_POOL_RECYCLE", "1800")),  # recycle after 30 min
         "pool_timeout": int(os.getenv("DB_POOL_TIMEOUT", "30")),
-        "connect_args": _connect_args,
     })
 
 engine = create_engine(DATABASE_URL, **ENGINE_KWARGS)
