@@ -761,6 +761,7 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
   const [loading, setLoading] = useState(false);
   // Per-warehouse accurate stock cache: { warehouseId: stockArray }
   const [warehouseStocksCache, setWarehouseStocksCache] = useState({});
+  const [warehouseStocksLoading, setWarehouseStocksLoading] = useState({});
 
   const addGroup    = () => setGroups(p => [...p, blankGroup()]);
   const removeGroup = gi => setGroups(p => p.filter((_, i) => i !== gi));
@@ -769,11 +770,16 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
 
   // Fetch accurate per-warehouse stock when a warehouse is selected
   const fetchWarehouseStocks = useCallback(async (warehouseId) => {
-    if (!warehouseId || warehouseStocksCache[warehouseId]) return;
+    if (!warehouseId || warehouseStocksCache[warehouseId] !== undefined) return;
+    setWarehouseStocksLoading(prev => ({ ...prev, [warehouseId]: true }));
     try {
       const r = await warehouseApi.getStocks(warehouseId);
       setWarehouseStocksCache(prev => ({ ...prev, [warehouseId]: r.data || [] }));
-    } catch { /* ignore, fallback to global stocks */ }
+    } catch {
+      setWarehouseStocksCache(prev => ({ ...prev, [warehouseId]: [] }));
+    } finally {
+      setWarehouseStocksLoading(prev => ({ ...prev, [warehouseId]: false }));
+    }
   }, [warehouseStocksCache]);
 
   const addWeightEntry = (gi, wkg) =>
@@ -804,21 +810,33 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
     return brands.filter(b => bIds.has(String(b.id)));
   }, [brands, stocksWithQty]);
 
-  const warehousesForGroup = brandId => {
+  const warehousesForGroup = (brandId, currentWarehouseId) => {
     if (!brandId) return [];
+    // Start from global stocks to get candidate warehouses
     const wIds = new Set(
       stocksWithQty
         .filter(s => String(s.brand_id ?? s.brand?.id) === String(brandId))
         .map(s => s.warehouse_id ?? s.warehouse?.id)
     );
-    return warehouses.filter(w => wIds.has(w.id));
+    return warehouses.filter(w => {
+      if (!wIds.has(w.id)) return false;
+      // If we have fresh warehouse-specific cache, validate remaining stock
+      const cache = warehouseStocksCache[w.id];
+      if (cache) {
+        return cache.some(
+          s => String(s.brand_id) === String(brandId) && (s.remaining_bags ?? 0) > 0
+        );
+      }
+      return true;
+    });
   };
 
   const weightRowsForGroup = (brandId, warehouseId) => {
     if (!brandId || !warehouseId) return [];
-    // Prefer accurate warehouse-specific stocks (fetched dynamically); fall back to global stocks
+    // If cache fetch is in-flight, fall back to global stocks temporarily
+    const isLoading = warehouseStocksLoading[warehouseId];
     const whStocks = warehouseStocksCache[warehouseId];
-    const sourceStocks = whStocks
+    const sourceStocks = (whStocks && !isLoading)
       ? whStocks.filter(s => (s.remaining_bags ?? 0) > 0)
       : stocksWithQty;
 
@@ -981,7 +999,7 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
         <SectionLabel>{i18n.language === "ta" ? "அனுப்பும் சரக்கு" : "Items to Send"}</SectionLabel>
         <div className="space-y-3">
           {groups.map((g, gi) => {
-            const availWarehouses  = warehousesForGroup(g.brand_id);
+            const availWarehouses  = warehousesForGroup(g.brand_id, g.warehouse_id);
             const availWeights     = weightRowsForGroup(g.brand_id, g.warehouse_id);
             const addedWkgs        = new Set(g.weight_entries.map(e => e.weight_kg));
             const remainingWeights = availWeights.filter(w => !addedWkgs.has(w.weight_kg));
@@ -1135,9 +1153,17 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
                   )}
 
                   {g.warehouse_id && availWeights.length === 0 && (
-                    <p className="text-xs py-2 text-center" style={{ color: "var(--text-muted)" }}>
-                      No stock found for this warehouse.
-                    </p>
+                    warehouseStocksLoading[g.warehouse_id] ? (
+                      <div className="flex items-center justify-center gap-2 py-3">
+                        <div className="w-4 h-4 rounded-full border-2 animate-spin"
+                          style={{ borderColor: "var(--border)", borderTopColor: "var(--accent)" }} />
+                        <span className="text-xs" style={{ color: "var(--text-muted)" }}>Loading stock…</span>
+                      </div>
+                    ) : (
+                      <p className="text-xs py-2 text-center" style={{ color: "var(--text-muted)" }}>
+                        No stock found for this warehouse.
+                      </p>
+                    )
                   )}
                 </div>
               </div>
@@ -1233,7 +1259,19 @@ function TransactionForm({ onSubmit, onClose, brands, riceTypes, warehouses,
 /* ═══════════════════════════════════════════════════════
    PENDING ADMIN MODAL
    ═══════════════════════════════════════════════════════ */
-function PendingAdminModal({ tx, onClose, onSave, i18n }) {
+function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
+  // Fetch fresh transaction data so we always see the latest saved fields
+  const [tx, setTx] = useState(initialTx);
+  const [fetchingFresh, setFetchingFresh] = useState(true);
+
+  useEffect(() => {
+    setFetchingFresh(true);
+    transactionApi.get(initialTx.id)
+      .then(r => setTx(r.data || initialTx))
+      .catch(() => setTx(initialTx))
+      .finally(() => setFetchingFresh(false));
+  }, [initialTx.id]);
+
   const isArrival = tx.transaction_type === "inbound";
 
   // Arrival state — only shown if not already filled
@@ -1247,20 +1285,43 @@ function PendingAdminModal({ tx, onClose, onSave, i18n }) {
   const [rent, setRent] = useState("");
   const [hiddenCharges, setHiddenCharges] = useState("");
 
-  // Per-weight-row buying prices: key = `${item_id}__${weight_kg}`
-  // Only include rows where buying_price is NOT yet set
-  const initWeightPrices = () => {
+  // Per-weight-row buying prices — keyed by `${item_id}__${weight_kg}`
+  // Initialise from existing saved prices; update when fresh tx loads
+  const [weightBuyingPrices, setWeightBuyingPrices] = useState(() => {
     const out = {};
-    (tx.items || []).forEach(it => {
+    (initialTx.items || []).forEach(it => {
       (it.weights || []).forEach(w => {
-        // Pre-fill already-saved prices so admin can see/edit them
-        if (w.buying_price != null)
-          out[`${it.id}__${w.weight_kg}`] = String(w.buying_price);
+        if (w.buying_price != null) out[`${it.id}__${w.weight_kg}`] = String(w.buying_price);
       });
     });
     return out;
-  };
-  const [weightBuyingPrices, setWeightBuyingPrices] = useState(initWeightPrices);
+  });
+
+  // Re-seed price maps when fresh tx data arrives
+  useEffect(() => {
+    if (fetchingFresh) return;
+    setWeightBuyingPrices(prev => {
+      const out = { ...prev };
+      (tx.items || []).forEach(it => {
+        (it.weights || []).forEach(w => {
+          const key = `${it.id}__${w.weight_kg}`;
+          if (w.buying_price != null && !out[key]) out[key] = String(w.buying_price);
+        });
+      });
+      return out;
+    });
+    setWeightSellingPrices(prev => {
+      const out = { ...prev };
+      (tx.items || []).forEach(it => {
+        (it.weights || []).forEach(w => {
+          const key = `${it.id}__${w.weight_kg}`;
+          const sp = w.selling_price ?? it.selling_price ?? null;
+          if (sp != null && !out[key]) out[key] = String(sp);
+        });
+      });
+      return out;
+    });
+  }, [tx, fetchingFresh]);
 
   // Send state — only shown if not already filled
   const toWhomAlreadyFilled = !!(tx.commission_partner && tx.commission_partner.trim());
@@ -1270,19 +1331,16 @@ function PendingAdminModal({ tx, onClose, onSave, i18n }) {
   const [location, setLocation] = useState("");
 
   // Per-weight-row selling prices for send: key = `${item_id}__${weight_kg}`
-  const initSellPrices = () => {
+  const [weightSellingPrices, setWeightSellingPrices] = useState(() => {
     const out = {};
-    (tx.items || []).forEach(it => {
+    (initialTx.items || []).forEach(it => {
       (it.weights || []).forEach(w => {
-        if (w.selling_price != null)
-          out[`${it.id}__${w.weight_kg}`] = String(w.selling_price);
-        else if (it.selling_price != null)
-          out[`${it.id}__${w.weight_kg}`] = String(it.selling_price);
+        const sp = w.selling_price ?? it.selling_price ?? null;
+        if (sp != null) out[`${it.id}__${w.weight_kg}`] = String(sp);
       });
     });
     return out;
-  };
-  const [weightSellingPrices, setWeightSellingPrices] = useState(initSellPrices);
+  });
 
   const [loading, setLoading] = useState(false);
 
@@ -1392,6 +1450,16 @@ function PendingAdminModal({ tx, onClose, onSave, i18n }) {
     catch (err) { toast.error(getErrorMessage(err, "Failed to update")); }
     finally { setLoading(false); }
   };
+
+  if (fetchingFresh) {
+    return (
+      <div className="flex flex-col items-center justify-center py-10 gap-3">
+        <div className="w-8 h-8 rounded-full border-2 animate-spin"
+          style={{ borderColor: "var(--border)", borderTopColor: "var(--accent)" }} />
+        <span className="text-sm" style={{ color: "var(--text-muted)" }}>Loading latest data…</span>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
@@ -2002,7 +2070,11 @@ export default function TransactionsPage() {
     Object.entries(filters).forEach(([k, v]) => { if (v) params[k] = v; });
     transactionApi.list(params)
       .then(r => setTransactions(r.data || []))
-      .catch(() => setTransactions([]))
+      .catch(err => {
+        console.error("Failed to load transactions:", err);
+        setTransactions([]);
+        toast.error(getErrorMessage(err, "Failed to load transactions"));
+      })
       .finally(() => setLoading(false));
   }, [filters]);
 
@@ -2042,18 +2114,26 @@ export default function TransactionsPage() {
     try {
       await transactionApi.delete(deleteTarget.id);
       toast.success(i18n.language === "ta" ? "பரிவர்த்தனை நீக்கப்பட்டது" : "Transaction deleted");
-      setDeleteTarget(null); load();
+      setDeleteTarget(null); load(); refreshStocks();
     } catch (err) { toast.error(getErrorMessage(err, "Failed to delete")); }
   };
 
-  const handlePendingFill = async (id, data) => { await transactionApi.completeAdminFields(id, data); load(); };
+  const handlePendingFill = async (id, data) => {
+    await transactionApi.completeAdminFields(id, data);
+    load();
+    refreshStocks();
+  };
 
   const activeFilters = Object.values(filters).filter(Boolean).length;
   const clearFilters = () => setFilters({ transaction_type: "", warehouse_id: "", brand_id: "", date_from: "", date_to: "", vehicle_no: "", mill_owner_name: "" });
   const toggleCard = (id) => setOpenCardId(prev => prev === id ? null : id);
 
-  const totalArrival = transactions.filter(tx => tx.transaction_type === "inbound").reduce((s, tx) => s + (tx.total_bags ?? tx.quantity_bags ?? 0), 0);
-  const totalSend    = transactions.filter(tx => tx.transaction_type === "outbound").reduce((s, tx) => s + (tx.total_bags ?? tx.quantity_bags ?? 0), 0);
+  const arrivalTxs  = transactions.filter(tx => tx.transaction_type === "inbound");
+  const sendTxs     = transactions.filter(tx => tx.transaction_type === "outbound");
+  const totalArrival = arrivalTxs.reduce((s, tx) => s + (tx.total_bags ?? tx.quantity_bags ?? 0), 0);
+  const totalSend    = sendTxs.reduce((s, tx) => s + (tx.total_bags ?? tx.quantity_bags ?? 0), 0);
+  const totalArrivalKg = arrivalTxs.reduce((s, tx) => s + (tx.total_weight_kg ?? 0), 0);
+  const totalSendKg    = sendTxs.reduce((s, tx) => s + (tx.total_weight_kg ?? 0), 0);
   const pendingCount = transactions.filter(tx => tx.admin_pending).length;
 
   return (
@@ -2068,8 +2148,6 @@ export default function TransactionsPage() {
           </h1>
           <p className="text-xs mt-0.5 font-medium" style={{ color: "var(--text-muted)" }}>
             {transactions.length} {i18n.language === "ta" ? "பரிவர்த்தனைகள்" : "transactions"}
-            {totalArrival > 0 && <span style={{ color: "#10b981" }}> · ▲{totalArrival}</span>}
-            {totalSend > 0 && <span style={{ color: "#ef4444" }}> · ▼{totalSend}</span>}
             {isAdmin && pendingCount > 0 && <span style={{ color: "#f59e0b" }}> · ⚠ {pendingCount} pending</span>}
           </p>
         </div>
@@ -2091,45 +2169,68 @@ export default function TransactionsPage() {
         </div>
       </div>
 
-      {/* Quick action cards */}
+      {/* Dashboard-style summary stats */}
       <div className="grid grid-cols-2 gap-3">
+        {/* Arrival stat + action */}
         <button onClick={() => setModal({ initialType: "arrival" })}
-          className="relative overflow-hidden transition-all"
+          className="relative overflow-hidden transition-all text-left"
           style={{
-            background: "linear-gradient(135deg, rgba(16,185,129,0.06) 0%, rgba(16,185,129,0.01) 100%)",
-            border: "2px solid rgba(16,185,129,0.18)", borderRadius: 16, padding: "18px 12px",
+            background: "linear-gradient(135deg, rgba(16,185,129,0.10) 0%, rgba(16,185,129,0.03) 100%)",
+            border: "2px solid rgba(16,185,129,0.22)", borderRadius: 18, padding: "16px 14px",
           }}>
-          <div className="flex flex-col items-center gap-2">
-            <div className="w-12 h-12 rounded-2xl flex items-center justify-center"
-              style={{ backgroundColor: "rgba(16,185,129,0.1)" }}>
-              <ArrowDownToLine size={22} style={{ color: "#10b981" }} />
+          <div className="flex items-start justify-between mb-3">
+            <div className="w-10 h-10 rounded-2xl flex items-center justify-center"
+              style={{ backgroundColor: "rgba(16,185,129,0.14)" }}>
+              <ArrowDownToLine size={20} style={{ color: "#10b981" }} />
             </div>
-            <span className="text-sm font-extrabold" style={{ color: "#10b981" }}>
-              {i18n.language === "ta" ? "வரவு" : "Arrival"}
-            </span>
-            <span className="text-[11px] font-medium" style={{ color: "var(--text-muted)" }}>
-              {i18n.language === "ta" ? "இறக்கு" : "Unload Stock"}
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+              style={{ backgroundColor: "rgba(16,185,129,0.12)", color: "#10b981" }}>
+              {arrivalTxs.length} {i18n.language === "ta" ? "பரிவர்" : "txns"}
             </span>
           </div>
+          <p className="text-[11px] font-bold uppercase tracking-wider mb-0.5" style={{ color: "#10b981" }}>
+            {i18n.language === "ta" ? "வரவு" : "Arrivals"}
+          </p>
+          <p className="text-2xl font-extrabold tabular-nums leading-none" style={{ color: "var(--text-primary)", letterSpacing: "-0.03em" }}>
+            {totalArrival}
+            <span className="text-sm font-semibold ml-1" style={{ color: "var(--text-muted)" }}>bags</span>
+          </p>
+          {totalArrivalKg > 0 && (
+            <p className="text-xs mt-1 font-medium" style={{ color: "var(--text-muted)" }}>
+              {(totalArrivalKg / 1000).toFixed(2)} T total
+            </p>
+          )}
         </button>
+
+        {/* Send stat + action */}
         <button onClick={() => setModal({ initialType: "send" })}
-          className="relative overflow-hidden transition-all"
+          className="relative overflow-hidden transition-all text-left"
           style={{
-            background: "linear-gradient(135deg, rgba(239,68,68,0.06) 0%, rgba(239,68,68,0.01) 100%)",
-            border: "2px solid rgba(239,68,68,0.18)", borderRadius: 16, padding: "18px 12px",
+            background: "linear-gradient(135deg, rgba(239,68,68,0.10) 0%, rgba(239,68,68,0.03) 100%)",
+            border: "2px solid rgba(239,68,68,0.22)", borderRadius: 18, padding: "16px 14px",
           }}>
-          <div className="flex flex-col items-center gap-2">
-            <div className="w-12 h-12 rounded-2xl flex items-center justify-center"
-              style={{ backgroundColor: "rgba(239,68,68,0.1)" }}>
-              <ArrowUpFromLine size={22} style={{ color: "#ef4444" }} />
+          <div className="flex items-start justify-between mb-3">
+            <div className="w-10 h-10 rounded-2xl flex items-center justify-center"
+              style={{ backgroundColor: "rgba(239,68,68,0.12)" }}>
+              <ArrowUpFromLine size={20} style={{ color: "#ef4444" }} />
             </div>
-            <span className="text-sm font-extrabold" style={{ color: "#ef4444" }}>
-              {i18n.language === "ta" ? "அனுப்பு" : "Send"}
-            </span>
-            <span className="text-[11px] font-medium" style={{ color: "var(--text-muted)" }}>
-              {i18n.language === "ta" ? "செலவு" : "Dispatch Stock"}
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+              style={{ backgroundColor: "rgba(239,68,68,0.10)", color: "#ef4444" }}>
+              {sendTxs.length} {i18n.language === "ta" ? "பரிவர்" : "txns"}
             </span>
           </div>
+          <p className="text-[11px] font-bold uppercase tracking-wider mb-0.5" style={{ color: "#ef4444" }}>
+            {i18n.language === "ta" ? "அனுப்பு" : "Dispatched"}
+          </p>
+          <p className="text-2xl font-extrabold tabular-nums leading-none" style={{ color: "var(--text-primary)", letterSpacing: "-0.03em" }}>
+            {totalSend}
+            <span className="text-sm font-semibold ml-1" style={{ color: "var(--text-muted)" }}>bags</span>
+          </p>
+          {totalSendKg > 0 && (
+            <p className="text-xs mt-1 font-medium" style={{ color: "var(--text-muted)" }}>
+              {(totalSendKg / 1000).toFixed(2)} T total
+            </p>
+          )}
         </button>
       </div>
 
