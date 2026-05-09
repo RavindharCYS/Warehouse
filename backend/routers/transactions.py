@@ -580,14 +580,25 @@ def create_arrival(
     txn.total_bags = grand_units
     txn.total_weight_kg = grand_kg
 
-    # Check if all weight rows have buying_price — if so, mark complete
+    # Check if all weight rows have buying_price (or item-level buying_price) — if so, mark complete
     # mill_owner_name is optional; we only require that prices are entered.
     if is_admin:
         db.flush()
         all_weights = db.query(TransactionItemWeight).join(TransactionItem).filter(
             TransactionItem.transaction_id == txn.id
         ).all()
-        all_priced = all(w.buying_price is not None for w in all_weights) if all_weights else False
+        all_items_map = {
+            it.id: it for it in db.query(TransactionItem).filter(
+                TransactionItem.transaction_id == txn.id
+            ).all()
+        }
+        def _is_priced(w):
+            if w.buying_price is not None:
+                return True
+            parent = all_items_map.get(w.item_id)
+            return parent is not None and parent.buying_price is not None
+
+        all_priced = all(_is_priced(w) for w in all_weights) if all_weights else False
         if all_priced:
             txn.admin_pending = False
             txn.approval_status = ApprovalStatus.completed
@@ -773,6 +784,8 @@ def complete_admin_fields(
 
         if "rent" in payload:            tx.rent = payload["rent"]
         if "hidden_charges" in payload:  tx.hidden_charges = payload["hidden_charges"]
+        if "commission_partner" in payload and payload["commission_partner"]:
+            tx.commission_partner = payload["commission_partner"]
 
         # Per-item buying prices: { item_id: price } — sets item-level buying_price
         if "item_buying_prices" in payload and isinstance(payload["item_buying_prices"], dict):
@@ -885,11 +898,29 @@ def complete_admin_fields(
             tx.profit_loss = _compute_profit_loss(tx.price, tx.sell_price, tx.total_bags or 0)
 
     # Mark pending based on whether all weight rows have prices
+    # A weight row is considered priced if:
+    #   - its own buying_price is set, OR
+    #   - its parent TransactionItem has a buying_price (set at arrival by admin)
     if tx.transaction_type == TransactionType.inbound:
-        all_w = db.query(TransactionItemWeight).join(TransactionItem).filter(
-            TransactionItem.transaction_id == tx.id
-        ).all()
-        all_priced = all(w.buying_price is not None for w in all_w) if all_w else False
+        all_w = (
+            db.query(TransactionItemWeight)
+            .join(TransactionItem, TransactionItem.id == TransactionItemWeight.item_id)
+            .filter(TransactionItem.transaction_id == tx.id)
+            .all()
+        )
+        # Also load items to check item-level buying_price
+        all_items_map = {
+            it.id: it for it in db.query(TransactionItem).filter(
+                TransactionItem.transaction_id == tx.id
+            ).all()
+        }
+        def _weight_is_priced(w):
+            if w.buying_price is not None:
+                return True
+            parent = all_items_map.get(w.item_id)
+            return parent is not None and parent.buying_price is not None
+
+        all_priced = all(_weight_is_priced(w) for w in all_w) if all_w else False
         tx.admin_pending = not all_priced
         tx.approval_status = ApprovalStatus.pending if tx.admin_pending else ApprovalStatus.completed
     else:

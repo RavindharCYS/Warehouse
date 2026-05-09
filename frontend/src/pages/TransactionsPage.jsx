@@ -1298,6 +1298,8 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
   });
 
   // Re-seed price maps when fresh tx data arrives
+  // Picks up both weight-level prices (w.buying_price) and item-level prices (it.buying_price)
+  // so that prices entered at arrival time are also reflected here
   useEffect(() => {
     if (fetchingFresh) return;
     setWeightBuyingPrices(prev => {
@@ -1305,7 +1307,9 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
       (tx.items || []).forEach(it => {
         (it.weights || []).forEach(w => {
           const key = `${it.id}__${w.weight_kg}`;
-          if (w.buying_price != null && !out[key]) out[key] = String(w.buying_price);
+          // Prefer weight-level price, fall back to item-level price
+          const price = w.buying_price ?? it.buying_price ?? null;
+          if (price != null && !out[key]) out[key] = String(price);
         });
       });
       return out;
@@ -1345,7 +1349,7 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
   const [loading, setLoading] = useState(false);
 
   // Build weight rows for display — flatten items × weights
-  // For arrival: only show rows where buying_price is NOT yet filled
+  // For arrival: only show rows where buying_price is NOT yet filled (at weight OR item level, OR already in our local map)
   // For send: only show rows where selling_price is NOT yet filled
   const allWeightRows = useMemo(() => {
     const rows = [];
@@ -1357,12 +1361,18 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
         : [{ weight_kg: it.bag_size_kg, quantity: it.total_bags, buying_price: it.buying_price, selling_price: it.selling_price }];
       weights.forEach(w => {
         const isPiece = w.weight_kg < 25;
-        const existingBuyPrice = w.buying_price ?? it.buying_price ?? null;
+        const key = `${it.id}__${w.weight_kg}`;
+        // A weight row is considered "already priced" if:
+        //   1. The weight row itself has a buying_price saved on the backend, OR
+        //   2. The parent item has a buying_price (set at arrival time by admin), OR
+        //   3. We already have a value in our local price map for this key (saved in a prior admin-fields call)
+        const existingBuyPrice  = w.buying_price ?? it.buying_price ?? null;
         const existingSellPrice = w.selling_price ?? it.selling_price ?? null;
-        // For arrival: skip rows where buying_price is already set
-        // For send: skip rows where selling_price is already set
-        if (isArrival && existingBuyPrice != null) return;
-        if (!isArrival && existingSellPrice != null) return;
+        const alreadyInBuyMap   = weightBuyingPrices[key] != null && weightBuyingPrices[key] !== "";
+        const alreadyInSellMap  = weightSellingPrices[key] != null && weightSellingPrices[key] !== "";
+
+        if (isArrival && (existingBuyPrice != null || alreadyInBuyMap)) return;
+        if (!isArrival && (existingSellPrice != null || alreadyInSellMap)) return;
         rows.push({
           itemId: it.id,
           brandLabel,
@@ -1373,12 +1383,12 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
           unitLabel: isPiece ? "piece" : "bag",
           existingBuyPrice,
           existingSellPrice,
-          key: `${it.id}__${w.weight_kg}`,
+          key,
         });
       });
     });
     return rows;
-  }, [tx, isArrival]);
+  }, [tx, isArrival, weightBuyingPrices, weightSellingPrices]);
 
   const handleSave = async () => {
     const data = {};
