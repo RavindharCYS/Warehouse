@@ -5,7 +5,7 @@ import {
   Trash2, Filter, X, ArrowLeftRight, Truck, MapPin, Calendar,
   ChevronDown, Package, FileText, Hash,
   ArrowDownToLine, ArrowUpFromLine, UserCheck, Phone, DollarSign,
-  Factory, Bell, User as UserIcon,
+  Factory, Bell, User as UserIcon, Warehouse,
 } from "lucide-react";
 import { format } from "date-fns";
 import toast from "react-hot-toast";
@@ -637,7 +637,7 @@ function TransactionAccordion({ tx, isOpen, onToggle, isAdmin,
                         {it.splits.map((s, si) => (
                           <span key={si} className="text-[10px] font-semibold px-1.5 py-0.5 rounded inline-flex items-center gap-1"
                             style={{ backgroundColor: "rgba(99,102,241,0.08)", color: "#6366f1" }}>
-                            <Building2 size={9} />
+                            <Warehouse size={9} />
                             {s.warehouse?.location_name || wName(s.warehouse_id)}: {s.bags}
                           </span>
                         ))}
@@ -646,7 +646,7 @@ function TransactionAccordion({ tx, isOpen, onToggle, isAdmin,
                     {it.warehouse_id && (!it.splits || !it.splits.length) && (
                       <div className="mt-1.5 text-[11px] font-semibold inline-flex items-center gap-1 px-1.5 py-0.5 rounded"
                         style={{ backgroundColor: "rgba(99,102,241,0.08)", color: "#6366f1" }}>
-                        <Building2 size={9} /> {it.warehouse?.location_name || wName(it.warehouse_id)}
+                        <Warehouse size={9} /> {it.warehouse?.location_name || wName(it.warehouse_id)}
                       </div>
                     )}
                   </div>
