@@ -238,6 +238,42 @@ def get_warehouse_stocks(
             .first()
         )
 
+        # Build accurate weight breakdown for this (brand, warehouse, bag_size) combo
+        # from TransactionItemWeight rows proportionally allocated to this warehouse via splits.
+        weight_inbound_agg = (
+            db.query(
+                TransactionItemWeight.weight_kg,
+                func.coalesce(func.sum(
+                    TransactionItemWeight.quantity *
+                    TransactionItemSplit.bags /
+                    TransactionItem.total_bags
+                ), 0).label("qty"),
+            )
+            .join(TransactionItem, TransactionItem.id == TransactionItemWeight.item_id)
+            .join(TransactionItemSplit, TransactionItemSplit.item_id == TransactionItem.id)
+            .join(Transaction, Transaction.id == TransactionItem.transaction_id)
+            .filter(
+                Transaction.transaction_type == TransactionType.inbound,
+                TransactionItem.brand_id == c.brand_id,
+                TransactionItem.bag_size_kg == bag_size,
+                TransactionItemSplit.warehouse_id == warehouse_id,
+                TransactionItem.total_bags > 0,
+            )
+        )
+        if c.rice_type_id is not None:
+            weight_inbound_agg = weight_inbound_agg.filter(
+                TransactionItem.rice_type_id == c.rice_type_id
+            )
+        weight_inbound_agg = weight_inbound_agg.group_by(
+            TransactionItemWeight.weight_kg
+        ).all()
+
+        weight_breakdowns = [
+            {"weight_kg": float(r.weight_kg), "quantity": max(0, int(round(float(r.qty))))}
+            for r in weight_inbound_agg
+            if round(float(r.qty)) > 0
+        ]
+
         result.append({
             "stock_id": stock_row.id if stock_row else None,
             "brand_id": c.brand_id,
@@ -251,6 +287,7 @@ def get_warehouse_stocks(
             "total_outbound_bags": outbound,
             "remaining_bags": remaining,
             "remaining_kg": remaining * bag_size,
+            "weight_breakdowns": weight_breakdowns,
         })
 
     result.sort(key=lambda x: x["remaining_bags"], reverse=True)

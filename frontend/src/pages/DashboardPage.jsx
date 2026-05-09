@@ -1728,26 +1728,41 @@ export default function DashboardPage() {
   };
 
   // Consolidated stock totals from actual weight_breakdowns
+  // weight_breakdowns from API already reflect current remaining quantities (outbound deducted).
+  // Pieces (weight < 25kg) are consolidated into 25kg bags for overview display.
   const stockTotals = (() => {
-    let totalBags = 0, totalPieces = 0, totalKg = 0;
+    let totalBags = 0, totalPieceKg = 0, totalKg = 0;
     for (const s of stocks) {
       if (s.weight_breakdowns && s.weight_breakdowns.length > 0) {
         for (const wb of s.weight_breakdowns) {
           const qty = wb.quantity || 0;
           if (qty <= 0) continue;
-          if (wb.weight_kg >= 25) totalBags += qty;
-          else totalPieces += qty;
-          totalKg += qty * wb.weight_kg;
+          const wkg = wb.weight_kg || 25;
+          if (wkg >= 25) {
+            totalBags += qty;
+            totalKg += qty * wkg;
+          } else {
+            totalPieceKg += qty * wkg;
+            totalKg += qty * wkg;
+          }
         }
       } else {
-        const qty = s.remaining_bags ?? s.total_bags ?? 0;
+        const qty = s.remaining_bags ?? 0;
         if (qty <= 0) continue;
-        if ((s.bag_weight_kg || 25) >= 25) totalBags += qty;
-        else totalPieces += qty;
-        totalKg += qty * (s.bag_weight_kg || 25);
+        const wkg = s.bag_weight_kg || 25;
+        if (wkg >= 25) {
+          totalBags += qty;
+          totalKg += qty * wkg;
+        } else {
+          totalPieceKg += qty * wkg;
+          totalKg += qty * wkg;
+        }
       }
     }
-    return { totalBags, totalPieces, totalKg };
+    // Consolidate pieces into 25kg bags for overview
+    const piecesAsBags = Math.floor(totalPieceKg / 25);
+    const leftoverKg = Math.round((totalPieceKg - piecesAsBags * 25) * 100) / 100;
+    return { totalBags: totalBags + piecesAsBags, totalPieces: 0, totalKg, leftoverKg };
   })();
 
   if (loading) return <DashboardSkeleton />;
@@ -1847,21 +1862,13 @@ export default function DashboardPage() {
               {t("dashboard.totalStock")}
             </p>
             <div className="mt-1.5 space-y-0.5">
-              {stockTotals.totalBags > 0 && (
-                <p className="text-3xl font-extrabold text-white tracking-tight">
-                  {stockTotals.totalBags.toLocaleString()}
-                  <span className="text-base font-medium ml-2 text-white/70">bags</span>
-                </p>
-              )}
-              {stockTotals.totalPieces > 0 && (
-                <p className={`font-extrabold text-white tracking-tight ${stockTotals.totalBags > 0 ? "text-lg" : "text-3xl"}`}>
-                  {stockTotals.totalPieces.toLocaleString()}
-                  <span className="text-base font-medium ml-2 text-white/70">pieces</span>
-                </p>
-              )}
-              {stockTotals.totalBags === 0 && stockTotals.totalPieces === 0 && (
-                <p className="text-3xl font-extrabold text-white tracking-tight">0
-                  <span className="text-base font-medium ml-2 text-white/70">bags</span>
+              <p className="text-3xl font-extrabold text-white tracking-tight">
+                {stockTotals.totalBags.toLocaleString()}
+                <span className="text-base font-medium ml-2 text-white/70">bags</span>
+              </p>
+              {stockTotals.leftoverKg > 0 && (
+                <p className="text-sm font-medium text-white/60">
+                  + {stockTotals.leftoverKg.toFixed(1)} kg loose
                 </p>
               )}
             </div>

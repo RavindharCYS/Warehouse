@@ -581,13 +581,14 @@ def create_arrival(
     txn.total_weight_kg = grand_kg
 
     # Check if all weight rows have buying_price — if so, mark complete
+    # mill_owner_name is optional; we only require that prices are entered.
     if is_admin:
         db.flush()
         all_weights = db.query(TransactionItemWeight).join(TransactionItem).filter(
             TransactionItem.transaction_id == txn.id
         ).all()
         all_priced = all(w.buying_price is not None for w in all_weights) if all_weights else False
-        if all_priced and txn.mill_owner_name:
+        if all_priced:
             txn.admin_pending = False
             txn.approval_status = ApprovalStatus.completed
             txn.completed_by = current_user.id

@@ -29,7 +29,7 @@ import {
 } from "lucide-react";
 import { format, parseISO } from "date-fns";
 import toast from "react-hot-toast";
-import { warehouseApi, getErrorMessage } from "../utils/api";
+import { warehouseApi, stockApi, getErrorMessage } from "../utils/api";
 import { useAuth } from "../hooks/useAuth";
 import Modal from "../components/common/Modal";
 import ConfirmDialog from "../components/common/ConfirmDialog";
@@ -350,117 +350,126 @@ function BrandInfoModal({ open, onClose, warehouseId, brandId, brandLabel }) {
 /* ══════════════════════════════════════════════════════════
    STOCK ROW INFO MODAL  (small popup for individual stock row)
    ══════════════════════════════════════════════════════════ */
-function StockRowInfoModal({ open, onClose, stock, warehouseId }) {
-  const [breakdown, setBreakdown] = useState(null);
+function StockRowInfoModal({ open, onClose, stock }) {
+  const { isAdmin } = useAuth();
+  const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (open && stock?.stock_id) {
-      setLoading(true);
-      warehouseApi
-        .getWeightBreakdown(warehouseId)
-        .then((r) => {
-          // Filter breakdown for this specific stock
-          const items = r.data?.items?.filter((b) => b.stock_id === stock.stock_id) || [];
-          setBreakdown(items);
-        })
-        .catch(() => setBreakdown([]))
-        .finally(() => setLoading(false));
-    }
-  }, [open, stock, warehouseId]);
+    if (!open || !stock?.stock_id) return;
+    setLoading(true);
+    stockApi
+      .getHistory(stock.stock_id)
+      .then((r) => setHistory(r.data || []))
+      .catch(() => setHistory([]))
+      .finally(() => setLoading(false));
+  }, [open, stock]);
 
   if (!stock) return null;
 
   return (
-    <Modal open={open} onClose={onClose} title={`${stock.brand_name} · Details`} size="md">
+    <Modal open={open} onClose={onClose} title={`${stock.brand_name} · Recent Transactions`} size="lg">
+      {/* Summary bar */}
+      <div className="grid grid-cols-3 gap-2 mb-4">
+        <div className="card" style={{ padding: 12, textAlign: "center" }}>
+          <p className="text-[10px] uppercase tracking-wider font-bold" style={{ color: "var(--text-muted)" }}>Remaining</p>
+          <p className="text-xl font-extrabold tabular-nums mt-1" style={{ color: "var(--accent)" }}>
+            {stock.remaining_bags?.toLocaleString() ?? 0}
+          </p>
+          <p className="text-[10px]" style={{ color: "var(--text-muted)" }}>bags</p>
+        </div>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}>
+          <p className="text-[10px] uppercase tracking-wider font-bold" style={{ color: "var(--text-muted)" }}>In</p>
+          <p className="text-xl font-extrabold tabular-nums mt-1" style={{ color: "var(--success)" }}>
+            {stock.total_inbound_bags ?? 0}
+          </p>
+          <p className="text-[10px]" style={{ color: "var(--text-muted)" }}>bags</p>
+        </div>
+        <div className="card" style={{ padding: 12, textAlign: "center" }}>
+          <p className="text-[10px] uppercase tracking-wider font-bold" style={{ color: "var(--text-muted)" }}>Out</p>
+          <p className="text-xl font-extrabold tabular-nums mt-1" style={{ color: "var(--danger)" }}>
+            {stock.total_outbound_bags ?? 0}
+          </p>
+          <p className="text-[10px]" style={{ color: "var(--text-muted)" }}>bags</p>
+        </div>
+      </div>
+
+      {/* Transaction history */}
       {loading ? (
         <div className="space-y-2">
-          {[1, 2, 3].map((i) => <div key={i} className="skeleton h-14 rounded-xl" />)}
+          {[1, 2, 3].map((i) => <div key={i} className="skeleton h-16 rounded-xl" />)}
+        </div>
+      ) : history.length === 0 ? (
+        <div className="empty-state">
+          <div className="empty-state-icon"><Package size={18} /></div>
+          <p className="empty-state-title">No transactions yet</p>
+          <p className="empty-state-text">No arrivals or sends recorded for this stock.</p>
         </div>
       ) : (
-        <div className="space-y-4">
-          {/* Summary */}
-          <div className="grid grid-cols-3 gap-2">
-            <div className="card" style={{ padding: 12, textAlign: "center" }}>
-              <p className="text-[10px] uppercase tracking-wider font-bold" style={{ color: "var(--text-muted)" }}>Bags</p>
-              <p className="text-xl font-extrabold tabular-nums mt-1" style={{ color: "var(--accent)" }}>
-                {stock.remaining_bags?.toLocaleString() ?? 0}
-              </p>
-            </div>
-            <div className="card" style={{ padding: 12, textAlign: "center" }}>
-              <p className="text-[10px] uppercase tracking-wider font-bold" style={{ color: "var(--text-muted)" }}>Weight</p>
-              <p className="text-xl font-extrabold tabular-nums mt-1" style={{ color: "var(--text-primary)" }}>
-                {((stock.remaining_kg ?? 0) / 1000).toFixed(2)}T
-              </p>
-            </div>
-            <div className="card" style={{ padding: 12, textAlign: "center" }}>
-              <p className="text-[10px] uppercase tracking-wider font-bold" style={{ color: "var(--text-muted)" }}>Bag Size</p>
-              <p className="text-xl font-extrabold tabular-nums mt-1" style={{ color: "var(--text-primary)" }}>
-                {stock.bag_weight_kg}<span className="text-xs ml-0.5">KG</span>
-              </p>
-            </div>
-          </div>
-
-          {/* Weight breakdown if available */}
-          {breakdown && breakdown.length > 0 && (
-            <div className="card" style={{ padding: 16 }}>
-              <p className="label mb-3">Weight Composition</p>
-              <div className="space-y-2">
-                {breakdown.map((b, i) => (
-                  <div
-                    key={i}
-                    className="flex items-center justify-between p-2.5 rounded-xl"
-                    style={{ backgroundColor: "var(--bg-secondary)", border: "1px solid var(--border-light)" }}
-                  >
-                    <div className="flex items-center gap-2">
-                      <Scale size={12} style={{ color: "var(--accent)" }} />
-                      <span className="text-sm font-bold" style={{ color: "var(--text-primary)" }}>
-                        {b.weight_kg} KG
-                      </span>
-                    </div>
-                    <span className="text-sm font-bold tabular-nums" style={{ color: "var(--text-secondary)" }}>
-                      × {b.quantity}
+        <div className="space-y-2">
+          {history.map((tx) => {
+            const isArrival = tx.transaction_type === "inbound";
+            const typeColor = isArrival ? "var(--success)" : "var(--danger)";
+            const typeBg = isArrival ? "var(--success-soft)" : "var(--danger-soft)";
+            const bags = tx.total_bags ?? tx.quantity_bags ?? 0;
+            return (
+              <div
+                key={tx.id}
+                className="rounded-xl overflow-hidden"
+                style={{ border: "1.5px solid var(--border)", borderLeftWidth: 4, borderLeftColor: typeColor }}
+              >
+                <div className="flex items-center justify-between px-3 py-2" style={{ backgroundColor: typeBg }}>
+                  <div className="flex items-center gap-2">
+                    {isArrival
+                      ? <ArrowDownToLine size={12} style={{ color: typeColor }} />
+                      : <ArrowUpFromLine size={12} style={{ color: typeColor }} />}
+                    <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: typeColor }}>
+                      {isArrival ? "Arrival" : "Send"}
+                    </span>
+                    <span className="text-xs font-bold" style={{ color: "var(--text-primary)" }}>
+                      {tx.vehicle_number || "—"}
+                    </span>
+                    {tx.admin_pending && (
+                      <span className="badge badge-warning text-[9px]">Pending</span>
+                    )}
+                  </div>
+                  <span className="text-base font-extrabold tabular-nums" style={{ color: typeColor }}>
+                    {isArrival ? "+" : "−"}{bags}
+                    <span className="text-[10px] font-normal ml-1" style={{ color: "var(--text-muted)" }}>bags</span>
+                  </span>
+                </div>
+                <div className="px-3 py-2 space-y-1">
+                  <div className="flex items-center gap-3 flex-wrap">
+                    {tx.driver_name && (
+                      <div className="flex items-center gap-1">
+                        <User size={10} style={{ color: "var(--text-muted)" }} />
+                        <span className="text-xs" style={{ color: "var(--text-secondary)" }}>{tx.driver_name}</span>
+                      </div>
+                    )}
+                    <span className="text-xs tabular-nums" style={{ color: "var(--text-muted)" }}>
+                      {format(parseISO(tx.transaction_date), "dd MMM yyyy, HH:mm")}
                     </span>
                   </div>
-                ))}
+                  {(tx.source || tx.destination) && (
+                    <div className="flex items-center gap-1 text-xs" style={{ color: "var(--text-secondary)" }}>
+                      <MapPin size={10} style={{ color: "var(--text-muted)" }} />
+                      <span>{isArrival ? `From: ${tx.source}` : `To: ${tx.destination}`}</span>
+                    </div>
+                  )}
+                  {isAdmin && (tx.price != null || tx.sell_price != null) && (
+                    <div className="flex flex-wrap gap-2 mt-1">
+                      {tx.price != null && (
+                        <span className="badge badge-muted text-[10px]">Buy: ₹{tx.price}</span>
+                      )}
+                      {tx.sell_price != null && (
+                        <span className="badge badge-muted text-[10px]">Sell: ₹{tx.sell_price}</span>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
-              <p className="text-[10px] mt-3" style={{ color: "var(--text-muted)" }}>
-                e.g. 10KG × 2 + 5KG × 1 = 1 bag of 25KG
-              </p>
-            </div>
-          )}
-
-          {/* Inbound/Outbound history */}
-          <div className="grid grid-cols-2 gap-2">
-            <div
-              className="card"
-              style={{ padding: 12, backgroundColor: "var(--success-soft)", borderColor: "var(--success)" }}
-            >
-              <div className="flex items-center gap-1.5 mb-1">
-                <TrendingUp size={12} style={{ color: "var(--success-text)" }} />
-                <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: "var(--success-text)" }}>
-                  Inbound
-                </p>
-              </div>
-              <p className="text-lg font-extrabold tabular-nums" style={{ color: "var(--success-text)" }}>
-                {stock.total_inbound_bags ?? 0}
-              </p>
-            </div>
-            <div
-              className="card"
-              style={{ padding: 12, backgroundColor: "var(--danger-soft)", borderColor: "var(--danger)" }}
-            >
-              <div className="flex items-center gap-1.5 mb-1">
-                <TrendingDown size={12} style={{ color: "var(--danger-text)" }} />
-                <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: "var(--danger-text)" }}>
-                  Outbound
-                </p>
-              </div>
-              <p className="text-lg font-extrabold tabular-nums" style={{ color: "var(--danger-text)" }}>
-                {stock.total_outbound_bags ?? 0}
-              </p>
-            </div>
-          </div>
+            );
+          })}
         </div>
       )}
     </Modal>
@@ -518,7 +527,24 @@ function WarehouseStockPanel({ warehouse, onClose }) {
   const sName = (s) => i18n.language === "ta" && s.brand_name_ta ? s.brand_name_ta : s.brand_name;
   const rType = (s) => i18n.language === "ta" && s.rice_type_ta ? s.rice_type_ta : s.rice_type;
 
-  const totalBags = stocks.reduce((a, s) => a + (s.remaining_bags || 0), 0);
+  // Compute consolidated display bags for a stock row
+  // weight_breakdowns already reflect remaining (outbound deducted by backend).
+  // For weight >= 25kg: count as bags. For weight < 25kg: consolidate into 25kg bags.
+  const getDisplayBags = (s) => {
+    const wbs = s.weight_breakdowns;
+    if (!wbs || wbs.length === 0) return s.remaining_bags || 0;
+    let bagCount = 0;
+    let pieceKg = 0;
+    for (const wb of wbs) {
+      const qty = wb.quantity || 0;
+      if (qty <= 0) continue;
+      if (wb.weight_kg >= 25) bagCount += qty;
+      else pieceKg += qty * wb.weight_kg;
+    }
+    return bagCount + Math.floor(pieceKg / 25);
+  };
+
+  const totalBags = stocks.reduce((a, s) => a + getDisplayBags(s), 0);
 
   // Group by brand for brand-click handler
   const handleBrandClick = (s) => {
@@ -662,8 +688,10 @@ function WarehouseStockPanel({ warehouse, onClose }) {
             ) : (
               <div className="p-4 space-y-2">
                 {stocks.map((s) => {
+                  const displayBags = getDisplayBags(s);
                   const pct = s.total_inbound_bags > 0
                     ? Math.round((s.remaining_bags / s.total_inbound_bags) * 100) : 0;
+                  const hasPieces = (s.weight_breakdowns || []).some(wb => wb.weight_kg < 25 && wb.quantity > 0);
                   return (
                     <div
                       key={s.stock_id}
@@ -697,9 +725,9 @@ function WarehouseStockPanel({ warehouse, onClose }) {
                           <div className="text-right">
                             <div
                               className="font-extrabold text-lg leading-none tabular-nums"
-                              style={{ color: s.remaining_bags > 0 ? "var(--accent)" : "var(--text-muted)" }}
+                              style={{ color: displayBags > 0 ? "var(--accent)" : "var(--text-muted)" }}
                             >
-                              {s.remaining_bags?.toLocaleString() ?? 0}
+                              {displayBags.toLocaleString()}
                             </div>
                             <div className="text-[10px] mt-0.5" style={{ color: "var(--text-muted)" }}>bags</div>
                           </div>
@@ -773,7 +801,6 @@ function WarehouseStockPanel({ warehouse, onClose }) {
         open={!!stockInfoModal}
         onClose={() => setStockInfoModal(null)}
         stock={stockInfoModal}
-        warehouseId={warehouse.id}
       />
 
       <style>{`
