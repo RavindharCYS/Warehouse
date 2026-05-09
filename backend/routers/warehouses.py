@@ -431,32 +431,70 @@ def get_warehouse_brand_info(
 
     # Total bags / kg
     total_bags = _brand_remaining_in_warehouse(db, warehouse_id, brand_id)
-    bag_size_rows = (
-        db.query(TransactionItem.bag_size_kg)
+
+    # Build accurate weight breakdown from TransactionItemWeight rows,
+    # proportionally allocated to this warehouse via splits, then subtract outbound.
+    # This shows actual weights (5KG, 10KG, 25KG etc.) not just bag_sizes.
+    weight_inbound_agg = (
+        db.query(
+            TransactionItemWeight.weight_kg,
+            func.coalesce(func.sum(
+                TransactionItemWeight.quantity *
+                TransactionItemSplit.bags /
+                TransactionItem.total_bags
+            ), 0).label("qty"),
+        )
+        .join(TransactionItem, TransactionItem.id == TransactionItemWeight.item_id)
         .join(TransactionItemSplit, TransactionItemSplit.item_id == TransactionItem.id)
         .join(Transaction, Transaction.id == TransactionItem.transaction_id)
         .filter(
             Transaction.transaction_type == TransactionType.inbound,
             TransactionItem.brand_id == brand_id,
             TransactionItemSplit.warehouse_id == warehouse_id,
+            TransactionItem.total_bags > 0,
         )
-        .distinct()
+        .group_by(TransactionItemWeight.weight_kg)
         .all()
     )
 
+    # Subtract outbound per weight (outbound bag_size_kg = weight being sent)
+    weight_outbound_agg = (
+        db.query(
+            TransactionItem.bag_size_kg.label("weight_kg"),
+            func.coalesce(func.sum(TransactionItem.total_bags), 0).label("qty"),
+        )
+        .join(Transaction, Transaction.id == TransactionItem.transaction_id)
+        .filter(
+            Transaction.transaction_type == TransactionType.outbound,
+            TransactionItem.brand_id == brand_id,
+            TransactionItem.warehouse_id == warehouse_id,
+        )
+        .group_by(TransactionItem.bag_size_kg)
+        .all()
+    )
+    outbound_by_weight = {float(r.weight_kg): int(r.qty or 0) for r in weight_outbound_agg}
+
     total_kg = 0.0
     weight_breakdown: List[BrandWeightBreakdownEntry] = []
-    for (bag_size,) in bag_size_rows:
-        bs = float(bag_size)
-        rem = _brand_remaining_in_warehouse(db, warehouse_id, brand_id, bs)
-        total_kg += rem * bs
-        if rem > 0:
-            weight_breakdown.append(BrandWeightBreakdownEntry(
-                weight_kg=bs,
-                quantity=rem,
-                bags=rem,
-                label=f"{bs:g}KG × {rem}",
-            ))
+    for r in weight_inbound_agg:
+        wkg = float(r.weight_kg)
+        inbound_qty = max(0, int(round(float(r.qty))))
+        out_qty = outbound_by_weight.get(wkg, 0)
+        remaining_qty = max(0, inbound_qty - out_qty)
+        if remaining_qty <= 0:
+            continue
+        total_kg += remaining_qty * wkg
+        is_piece = wkg < 25
+        unit_label = "pieces" if is_piece else "bags"
+        weight_breakdown.append(BrandWeightBreakdownEntry(
+            weight_kg=wkg,
+            quantity=remaining_qty,
+            bags=remaining_qty,
+            label=f"{wkg:g}KG × {remaining_qty} {unit_label}",
+        ))
+
+    # Sort by weight descending
+    weight_breakdown.sort(key=lambda x: x.weight_kg, reverse=True)
 
     # Recent arrivals (last 10 inbound transactions touching this brand+warehouse)
     arrivals_q = (

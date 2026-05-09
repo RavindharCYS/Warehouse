@@ -759,11 +759,22 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
   const blankGroup = () => ({ brand_id: "", warehouse_id: "", weight_entries: [] });
   const [groups, setGroups] = useState([blankGroup()]);
   const [loading, setLoading] = useState(false);
+  // Per-warehouse accurate stock cache: { warehouseId: stockArray }
+  const [warehouseStocksCache, setWarehouseStocksCache] = useState({});
 
   const addGroup    = () => setGroups(p => [...p, blankGroup()]);
   const removeGroup = gi => setGroups(p => p.filter((_, i) => i !== gi));
   const updateGroup = (gi, patch) =>
     setGroups(p => p.map((g, i) => i === gi ? { ...g, ...patch } : g));
+
+  // Fetch accurate per-warehouse stock when a warehouse is selected
+  const fetchWarehouseStocks = useCallback(async (warehouseId) => {
+    if (!warehouseId || warehouseStocksCache[warehouseId]) return;
+    try {
+      const r = await warehouseApi.getStocks(warehouseId);
+      setWarehouseStocksCache(prev => ({ ...prev, [warehouseId]: r.data || [] }));
+    } catch { /* ignore, fallback to global stocks */ }
+  }, [warehouseStocksCache]);
 
   const addWeightEntry = (gi, wkg) =>
     setGroups(p => p.map((g, i) => {
@@ -805,7 +816,13 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
 
   const weightRowsForGroup = (brandId, warehouseId) => {
     if (!brandId || !warehouseId) return [];
-    const matchingStocks = stocksWithQty.filter(
+    // Prefer accurate warehouse-specific stocks (fetched dynamically); fall back to global stocks
+    const whStocks = warehouseStocksCache[warehouseId];
+    const sourceStocks = whStocks
+      ? whStocks.filter(s => (s.remaining_bags ?? 0) > 0)
+      : stocksWithQty;
+
+    const matchingStocks = sourceStocks.filter(
       s => String(s.brand_id ?? s.brand?.id) === String(brandId) &&
            String(s.warehouse_id ?? s.warehouse?.id) === String(warehouseId)
     );
@@ -1007,7 +1024,11 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks, isAdmin, i18n
                       <label className="label">Warehouse *</label>
                       <select className="input-field" value={g.warehouse_id}
                         disabled={!g.brand_id}
-                        onChange={e => updateGroup(gi, { warehouse_id: e.target.value, weight_entries: [] })}>
+                        onChange={e => {
+                          const wId = e.target.value;
+                          updateGroup(gi, { warehouse_id: wId, weight_entries: [] });
+                          if (wId) fetchWarehouseStocks(Number(wId));
+                        }}>
                         <option value="">— Select —</option>
                         {availWarehouses.map(w => (
                           <option key={w.id} value={w.id}>
@@ -1215,18 +1236,24 @@ function TransactionForm({ onSubmit, onClose, brands, riceTypes, warehouses,
 function PendingAdminModal({ tx, onClose, onSave, i18n }) {
   const isArrival = tx.transaction_type === "inbound";
 
-  // Arrival state
-  const [millOwnerName, setMillOwnerName] = useState(tx.mill_owner_name || "");
-  const [commissionPartner, setCommissionPartner] = useState(tx.commission_partner || "");
-  const [rent, setRent] = useState(tx.rent ?? "");
-  const [hiddenCharges, setHiddenCharges] = useState(tx.hidden_charges ?? "");
+  // Arrival state — only shown if not already filled
+  const millOwnerAlreadyFilled = !!(tx.mill_owner_name && tx.mill_owner_name.trim());
+  const commissionAlreadyFilled = !!(tx.commission_partner && tx.commission_partner.trim());
+  const rentAlreadyFilled = tx.rent != null && tx.rent !== "";
+  const hiddenChargesAlreadyFilled = tx.hidden_charges != null && tx.hidden_charges !== "";
+
+  const [millOwnerName, setMillOwnerName] = useState("");
+  const [commissionPartner, setCommissionPartner] = useState("");
+  const [rent, setRent] = useState("");
+  const [hiddenCharges, setHiddenCharges] = useState("");
 
   // Per-weight-row buying prices: key = `${item_id}__${weight_kg}`
-  // Pre-fill from existing saved weight prices
+  // Only include rows where buying_price is NOT yet set
   const initWeightPrices = () => {
     const out = {};
     (tx.items || []).forEach(it => {
       (it.weights || []).forEach(w => {
+        // Pre-fill already-saved prices so admin can see/edit them
         if (w.buying_price != null)
           out[`${it.id}__${w.weight_kg}`] = String(w.buying_price);
       });
@@ -1235,9 +1262,12 @@ function PendingAdminModal({ tx, onClose, onSave, i18n }) {
   };
   const [weightBuyingPrices, setWeightBuyingPrices] = useState(initWeightPrices);
 
-  // Send state
-  const [toWhom, setToWhom] = useState(tx.commission_partner || "");
-  const [location, setLocation] = useState(tx.location || "");
+  // Send state — only shown if not already filled
+  const toWhomAlreadyFilled = !!(tx.commission_partner && tx.commission_partner.trim());
+  const locationAlreadyFilled = !!(tx.location && tx.location.trim());
+
+  const [toWhom, setToWhom] = useState("");
+  const [location, setLocation] = useState("");
 
   // Per-weight-row selling prices for send: key = `${item_id}__${weight_kg}`
   const initSellPrices = () => {
@@ -1257,6 +1287,8 @@ function PendingAdminModal({ tx, onClose, onSave, i18n }) {
   const [loading, setLoading] = useState(false);
 
   // Build weight rows for display — flatten items × weights
+  // For arrival: only show rows where buying_price is NOT yet filled
+  // For send: only show rows where selling_price is NOT yet filled
   const allWeightRows = useMemo(() => {
     const rows = [];
     (tx.items || []).forEach(it => {
@@ -1267,6 +1299,12 @@ function PendingAdminModal({ tx, onClose, onSave, i18n }) {
         : [{ weight_kg: it.bag_size_kg, quantity: it.total_bags, buying_price: it.buying_price, selling_price: it.selling_price }];
       weights.forEach(w => {
         const isPiece = w.weight_kg < 25;
+        const existingBuyPrice = w.buying_price ?? it.buying_price ?? null;
+        const existingSellPrice = w.selling_price ?? it.selling_price ?? null;
+        // For arrival: skip rows where buying_price is already set
+        // For send: skip rows where selling_price is already set
+        if (isArrival && existingBuyPrice != null) return;
+        if (!isArrival && existingSellPrice != null) return;
         rows.push({
           itemId: it.id,
           brandLabel,
@@ -1275,14 +1313,14 @@ function PendingAdminModal({ tx, onClose, onSave, i18n }) {
           quantity: w.quantity,
           isPiece,
           unitLabel: isPiece ? "piece" : "bag",
-          existingBuyPrice: w.buying_price ?? it.buying_price ?? null,
-          existingSellPrice: w.selling_price ?? it.selling_price ?? null,
+          existingBuyPrice,
+          existingSellPrice,
           key: `${it.id}__${w.weight_kg}`,
         });
       });
     });
     return rows;
-  }, [tx]);
+  }, [tx, isArrival]);
 
   const handleSave = async () => {
     const data = {};
@@ -1316,7 +1354,7 @@ function PendingAdminModal({ tx, onClose, onSave, i18n }) {
         data.item_weight_prices = weightPrices;
       }
 
-      if (!data.mill_owner_name && Object.keys(itemBuyingPrices).length === 0 && !data.rent) {
+      if (!data.mill_owner_name && Object.keys(itemBuyingPrices).length === 0 && !data.rent && allWeightRows.length === 0) {
         toast.error("Enter at least Mill Owner or one buying price to save");
         return;
       }
@@ -1370,38 +1408,66 @@ function PendingAdminModal({ tx, onClose, onSave, i18n }) {
 
       {isArrival ? (
         <>
-          {/* Mill Owner + Commission Partner */}
-          <div>
-            <label className="label flex items-center gap-1.5"><Factory size={11} /> Mill Owner Name</label>
-            <input className="input-field" value={millOwnerName}
-              onChange={e => setMillOwnerName(e.target.value)} placeholder="Mill owner..." />
-          </div>
-          <div>
-            <label className="label flex items-center gap-1.5"><UserCheck size={11} /> Commission Partner</label>
-            <input className="input-field" value={commissionPartner}
-              onChange={e => setCommissionPartner(e.target.value)} placeholder="Agent / Partner..." />
-          </div>
+          {/* Mill Owner + Commission Partner — only show if not already filled */}
+          {!millOwnerAlreadyFilled && (
+            <div>
+              <label className="label flex items-center gap-1.5"><Factory size={11} /> Mill Owner Name</label>
+              <input className="input-field" value={millOwnerName}
+                onChange={e => setMillOwnerName(e.target.value)} placeholder="Mill owner..." />
+            </div>
+          )}
+          {millOwnerAlreadyFilled && (
+            <div className="px-3 py-2 rounded-lg text-xs" style={{ backgroundColor: "var(--success-soft)", color: "var(--success)" }}>
+              ✓ Mill Owner: {tx.mill_owner_name}
+            </div>
+          )}
+          {!commissionAlreadyFilled && (
+            <div>
+              <label className="label flex items-center gap-1.5"><UserCheck size={11} /> Commission Partner</label>
+              <input className="input-field" value={commissionPartner}
+                onChange={e => setCommissionPartner(e.target.value)} placeholder="Agent / Partner..." />
+            </div>
+          )}
+          {commissionAlreadyFilled && (
+            <div className="px-3 py-2 rounded-lg text-xs" style={{ backgroundColor: "var(--success-soft)", color: "var(--success)" }}>
+              ✓ Commission Partner: {tx.commission_partner}
+            </div>
+          )}
 
-          {/* Global charges */}
-          <div>
-            <p className="text-[10px] font-bold uppercase tracking-wider mb-2"
-              style={{ color: "var(--text-muted)" }}>Global Charges</p>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-              <div>
-                <label className="label text-[10px]">Rent</label>
-                <input type="number" step="0.01" className="input-field" value={rent}
-                  onWheel={e => e.target.blur()} onChange={e => setRent(e.target.value)} placeholder="0" />
-              </div>
-              <div>
-                <label className="label text-[10px]">Hidden Charges</label>
-                <input type="number" step="0.01" className="input-field" value={hiddenCharges}
-                  onWheel={e => e.target.blur()} onChange={e => setHiddenCharges(e.target.value)} placeholder="0" />
+          {/* Global charges — only show unfilled ones */}
+          {(!rentAlreadyFilled || !hiddenChargesAlreadyFilled) && (
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider mb-2"
+                style={{ color: "var(--text-muted)" }}>Global Charges</p>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                {!rentAlreadyFilled ? (
+                  <div>
+                    <label className="label text-[10px]">Rent</label>
+                    <input type="number" step="0.01" className="input-field" value={rent}
+                      onWheel={e => e.target.blur()} onChange={e => setRent(e.target.value)} placeholder="0" />
+                  </div>
+                ) : (
+                  <div className="px-3 py-2 rounded-lg text-xs" style={{ backgroundColor: "var(--success-soft)", color: "var(--success)" }}>
+                    ✓ Rent: ₹{tx.rent}
+                  </div>
+                )}
+                {!hiddenChargesAlreadyFilled ? (
+                  <div>
+                    <label className="label text-[10px]">Hidden Charges</label>
+                    <input type="number" step="0.01" className="input-field" value={hiddenCharges}
+                      onWheel={e => e.target.blur()} onChange={e => setHiddenCharges(e.target.value)} placeholder="0" />
+                  </div>
+                ) : (
+                  <div className="px-3 py-2 rounded-lg text-xs" style={{ backgroundColor: "var(--success-soft)", color: "var(--success)" }}>
+                    ✓ Hidden Charges: ₹{tx.hidden_charges}
+                  </div>
+                )}
               </div>
             </div>
-          </div>
+          )}
 
-          {/* Per-weight buying prices */}
-          {allWeightRows.length > 0 && (
+          {/* Per-weight buying prices — only unfilled rows shown */}
+          {allWeightRows.length > 0 ? (
             <div>
               <p className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: "#6366f1" }}>
                 Buying Price per Weight
@@ -1425,18 +1491,13 @@ function PendingAdminModal({ tx, onClose, onSave, i18n }) {
                             {row.weight_kg} KG · {row.quantity} {row.unitLabel}{row.quantity !== 1 ? "s" : ""}
                           </span>
                         </div>
-                        {row.existingBuyPrice != null && val === "" && (
-                          <span className="text-[10px] font-bold" style={{ color: "#6366f1" }}>
-                            Saved: ₹{row.existingBuyPrice}
-                          </span>
-                        )}
                       </div>
                       <div className="flex gap-2 items-center">
                         <input type="number" step="0.01" className="input-field flex-1"
                           value={val}
                           onWheel={e => e.target.blur()}
                           onChange={e => setWeightBuyingPrices(p => ({ ...p, [row.key]: e.target.value }))}
-                          placeholder={`₹ per ${row.unitLabel}${row.existingBuyPrice ? ` (was ₹${row.existingBuyPrice})` : ""}`} />
+                          placeholder={`₹ per ${row.unitLabel}`} />
                         {total && (
                           <span className="text-[10px] font-bold whitespace-nowrap" style={{ color: "#6366f1" }}>
                             = ₹{total}
@@ -1448,23 +1509,39 @@ function PendingAdminModal({ tx, onClose, onSave, i18n }) {
                 })}
               </div>
             </div>
+          ) : (
+            <div className="px-3 py-2 rounded-lg text-xs" style={{ backgroundColor: "var(--success-soft)", color: "var(--success)" }}>
+              ✓ All buying prices are already filled for this transaction.
+            </div>
           )}
         </>
       ) : (
         <>
-          {/* Send: To Whom + Location */}
-          <div>
-            <label className="label flex items-center gap-1.5"><UserIcon size={11} /> To Whom</label>
-            <input className="input-field" value={toWhom}
-              onChange={e => setToWhom(e.target.value)} placeholder="Buyer / Recipient..." />
-          </div>
-          <div>
-            <label className="label flex items-center gap-1.5"><MapPin size={11} /> Location</label>
-            <input className="input-field" value={location}
-              onChange={e => setLocation(e.target.value)} placeholder="Location..." />
-          </div>
+          {/* Send: To Whom + Location — only show unfilled */}
+          {!toWhomAlreadyFilled ? (
+            <div>
+              <label className="label flex items-center gap-1.5"><UserIcon size={11} /> To Whom</label>
+              <input className="input-field" value={toWhom}
+                onChange={e => setToWhom(e.target.value)} placeholder="Buyer / Recipient..." />
+            </div>
+          ) : (
+            <div className="px-3 py-2 rounded-lg text-xs" style={{ backgroundColor: "var(--success-soft)", color: "var(--success)" }}>
+              ✓ To Whom: {tx.commission_partner}
+            </div>
+          )}
+          {!locationAlreadyFilled ? (
+            <div>
+              <label className="label flex items-center gap-1.5"><MapPin size={11} /> Location</label>
+              <input className="input-field" value={location}
+                onChange={e => setLocation(e.target.value)} placeholder="Location..." />
+            </div>
+          ) : (
+            <div className="px-3 py-2 rounded-lg text-xs" style={{ backgroundColor: "var(--success-soft)", color: "var(--success)" }}>
+              ✓ Location: {tx.location}
+            </div>
+          )}
 
-          {/* Per-weight selling prices */}
+          {/* Per-weight selling prices — only unfilled rows shown */}
           {allWeightRows.length > 0 ? (
             <div>
               <p className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: "#ef4444" }}>
@@ -1528,9 +1605,9 @@ function PendingAdminModal({ tx, onClose, onSave, i18n }) {
               </div>
             </div>
           ) : (
-            <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-              No weight details found for this transaction.
-            </p>
+            <div className="px-3 py-2 rounded-lg text-xs" style={{ backgroundColor: "var(--success-soft)", color: "var(--success)" }}>
+              ✓ All selling prices are already filled for this transaction.
+            </div>
           )}
         </>
       )}
