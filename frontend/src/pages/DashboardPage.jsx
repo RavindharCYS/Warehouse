@@ -409,6 +409,7 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onMaste
               weight: e.weight,
               quantity: e.quantity,
               warehouse_id: Number(e.warehouse_id),
+              buying_price: e.buying_price ?? null,  // FIX: was stripped, so prices never reached backend
             }));
 
           // Legacy aggregation for backward compatibility
