@@ -529,9 +529,11 @@ function WarehouseStockPanel({ warehouse, onClose }) {
   const sName = (s) => i18n.language === "ta" && s.brand_name_ta ? s.brand_name_ta : s.brand_name;
   const rType = (s) => i18n.language === "ta" && s.rice_type_ta ? s.rice_type_ta : s.rice_type;
 
-  // Compute consolidated display bags for a stock row
-  // weight_breakdowns already reflect remaining (outbound deducted by backend).
-  // For weight >= 25kg: count as bags. For weight < 25kg: consolidate into 25kg bags.
+  // Compute display bags for a stock row.
+  // ROOT CAUSE FIX: Now that the backend /stocks endpoint reads from Stock.total_bags
+  // (the same authoritative source as the /stocks page), remaining_bags is already
+  // the correct net figure.  We still need to convert pieces (weight < 25kg) into
+  // equivalent 25kg bag units for a meaningful "bags" count.
   const getDisplayBags = (s) => {
     const wbs = s.weight_breakdowns;
     if (!wbs || wbs.length === 0) return s.remaining_bags || 0;
@@ -543,10 +545,13 @@ function WarehouseStockPanel({ warehouse, onClose }) {
       if (wb.weight_kg >= 25) bagCount += qty;
       else pieceKg += qty * wb.weight_kg;
     }
-    return bagCount + Math.floor(pieceKg / 25);
+    // If weight_breakdowns sum to 0 but remaining_bags > 0, fall back
+    const fromBreakdown = bagCount + Math.floor(pieceKg / 25);
+    return fromBreakdown > 0 ? fromBreakdown : (s.remaining_bags || 0);
   };
 
   const totalBags = stocks.reduce((a, s) => a + getDisplayBags(s), 0);
+  const totalKg = stocks.reduce((a, s) => a + (s.remaining_kg || 0), 0);
 
   // Group by brand for brand-click handler
   const handleBrandClick = (s) => {
@@ -622,7 +627,7 @@ function WarehouseStockPanel({ warehouse, onClose }) {
                 <span className="font-bold tabular-nums" style={{ color: "var(--accent)" }}>
                   {totalBags.toLocaleString()}
                 </span>
-                {" "}total bags · {((warehouse.total_stock_kg ?? 0) / 1000).toFixed(2)} T
+                {" "}total bags · {(totalKg / 1000).toFixed(2)} T
               </p>
             </div>
             <button onClick={onClose} className="btn-ghost" style={{ padding: 8 }}>

@@ -25,39 +25,30 @@ router = APIRouter()
 # ============================================================
 def _wh_totals(warehouse_id: int, db: Session) -> tuple:
     """
-    Returns (stock_kg, total_bags) for a warehouse using new schema.
-    Inbound = TransactionItemSplit (per-warehouse), Outbound = TransactionItem.warehouse_id
+    Returns (stock_kg, total_bags) for a warehouse.
+
+    ROOT CAUSE FIX: Previously this read TransactionItemSplit.bags (raw inbound
+    split count) minus TransactionItem.total_bags (outbound).  But Stock.total_bags
+    is the authoritative remaining count — it is incremented on inbound and
+    decremented on outbound by _apply_inbound_to_stock / _apply_outbound_to_stock.
+    Using TransactionItemSplit produced totals that diverged from the /stocks page
+    because the split count was never decremented on outbound.
+
+    Now we sum Stock.total_bags and Stock.total_weight_kg directly, which always
+    matches what the Stocks page shows.
     """
-    in_q = (
+    result = (
         db.query(
-            func.coalesce(func.sum(TransactionItemSplit.bags), 0),
-            func.coalesce(func.sum(TransactionItemSplit.weight_kg), 0.0),
+            func.coalesce(func.sum(Stock.total_bags), 0),
+            func.coalesce(func.sum(Stock.total_weight_kg), 0.0),
         )
-        .join(TransactionItem, TransactionItem.id == TransactionItemSplit.item_id)
-        .join(Transaction, Transaction.id == TransactionItem.transaction_id)
-        .filter(
-            Transaction.transaction_type == TransactionType.inbound,
-            TransactionItemSplit.warehouse_id == warehouse_id,
-        )
+        .filter(Stock.warehouse_id == warehouse_id)
+        .first()
     )
-    in_bags, in_kg = in_q.first()
-
-    out_q = (
-        db.query(
-            func.coalesce(func.sum(TransactionItem.total_bags), 0),
-            func.coalesce(func.sum(TransactionItem.total_weight_kg), 0.0),
-        )
-        .join(Transaction, Transaction.id == TransactionItem.transaction_id)
-        .filter(
-            Transaction.transaction_type == TransactionType.outbound,
-            TransactionItem.warehouse_id == warehouse_id,
-        )
-    )
-    out_bags, out_kg = out_q.first()
-
+    total_bags, total_kg = result
     return (
-        max(0.0, float(in_kg or 0) - float(out_kg or 0)),
-        max(0, int(in_bags or 0) - int(out_bags or 0)),
+        max(0.0, float(total_kg or 0)),
+        max(0, int(total_bags or 0)),
     )
 
 
@@ -81,31 +72,22 @@ def _wh_with_stock(w: Warehouse, db: Session) -> WarehouseWithStock:
 def _brand_remaining_in_warehouse(
     db: Session, warehouse_id: int, brand_id: int, bag_size: Optional[float] = None
 ) -> int:
-    """Bags remaining for a (brand, warehouse[, bag_size]) combo."""
-    in_q = (
-        db.query(func.coalesce(func.sum(TransactionItemSplit.bags), 0))
-        .join(TransactionItem, TransactionItem.id == TransactionItemSplit.item_id)
-        .join(Transaction, Transaction.id == TransactionItem.transaction_id)
-        .filter(
-            Transaction.transaction_type == TransactionType.inbound,
-            TransactionItem.brand_id == brand_id,
-            TransactionItemSplit.warehouse_id == warehouse_id,
-        )
-    )
-    out_q = (
-        db.query(func.coalesce(func.sum(TransactionItem.total_bags), 0))
-        .join(Transaction, Transaction.id == TransactionItem.transaction_id)
-        .filter(
-            Transaction.transaction_type == TransactionType.outbound,
-            TransactionItem.brand_id == brand_id,
-            TransactionItem.warehouse_id == warehouse_id,
-        )
+    """
+    Bags remaining for a (brand, warehouse[, bag_size]) combo.
+
+    FIX: Use Stock.total_bags directly — it is decremented on every outbound
+    by _apply_outbound_to_stock, making it the authoritative remaining count
+    (same source used by the /stocks page).  The previous implementation
+    recomputed inbound - outbound from transaction tables which diverged from
+    the Stock table when proportional split rounding was involved.
+    """
+    q = db.query(func.coalesce(func.sum(Stock.total_bags), 0)).filter(
+        Stock.brand_id == brand_id,
+        Stock.warehouse_id == warehouse_id,
     )
     if bag_size is not None:
-        in_q = in_q.filter(TransactionItem.bag_size_kg == bag_size)
-        out_q = out_q.filter(TransactionItem.bag_size_kg == bag_size)
-
-    return max(0, int(in_q.scalar() or 0) - int(out_q.scalar() or 0))
+        q = q.filter(Stock.bag_weight_kg == bag_size)
+    return max(0, int(q.scalar() or 0))
 
 
 # ============================================================
@@ -147,146 +129,84 @@ def get_warehouse_stocks(
     if not w:
         raise HTTPException(status_code=404, detail="Warehouse not found")
 
-    # Find every (brand, bag_size) combo that has activity at this warehouse
-    combos_in = (
-        db.query(
-            TransactionItem.brand_id,
-            TransactionItem.rice_type_id,
-            TransactionItem.bag_size_kg,
-        )
-        .join(TransactionItemSplit, TransactionItemSplit.item_id == TransactionItem.id)
-        .join(Transaction, Transaction.id == TransactionItem.transaction_id)
+    # ROOT CAUSE FIX: Read directly from Stock + StockWeightBreakdown tables.
+    # These are kept in sync by _apply_inbound_to_stock / _apply_outbound_to_stock
+    # on every transaction, so they always match what the /stocks page displays.
+    # The previous implementation recomputed from TransactionItemSplit with
+    # proportional allocation, which diverged from Stock.total_bags due to
+    # integer rounding in the split math.
+    stock_rows = (
+        db.query(Stock)
         .filter(
-            Transaction.transaction_type == TransactionType.inbound,
-            TransactionItemSplit.warehouse_id == warehouse_id,
+            Stock.warehouse_id == warehouse_id,
+            Stock.total_bags > 0,
         )
-        .distinct()
         .all()
     )
-    combos_out = (
-        db.query(
-            TransactionItem.brand_id,
-            TransactionItem.rice_type_id,
-            TransactionItem.bag_size_kg,
-        )
-        .join(Transaction, Transaction.id == TransactionItem.transaction_id)
-        .filter(
-            Transaction.transaction_type == TransactionType.outbound,
-            TransactionItem.warehouse_id == warehouse_id,
-        )
-        .distinct()
-        .all()
-    )
-    seen = set()
-    combos = []
-    for c in list(combos_in) + list(combos_out):
-        key = (c.brand_id, c.rice_type_id, float(c.bag_size_kg))
-        if key in seen:
-            continue
-        seen.add(key)
-        combos.append(c)
 
     result = []
-    for c in combos:
-        bag_size = float(c.bag_size_kg)
+    for s in stock_rows:
+        bag_size = float(s.bag_weight_kg or 25.0)
 
-        in_q = (
+        # Compute inbound/outbound from the Stock row directly
+        # (total_bags is already the net remaining after outbound)
+        remaining = max(0, int(s.total_bags or 0))
+        if remaining == 0:
+            continue
+
+        # Inbound = what was ever put in (need to compute for display stats)
+        in_bags = (
             db.query(func.coalesce(func.sum(TransactionItemSplit.bags), 0))
             .join(TransactionItem, TransactionItem.id == TransactionItemSplit.item_id)
             .join(Transaction, Transaction.id == TransactionItem.transaction_id)
             .filter(
                 Transaction.transaction_type == TransactionType.inbound,
-                TransactionItem.brand_id == c.brand_id,
+                TransactionItem.brand_id == s.brand_id,
                 TransactionItem.bag_size_kg == bag_size,
                 TransactionItemSplit.warehouse_id == warehouse_id,
             )
         )
-        out_q = (
-            db.query(func.coalesce(func.sum(TransactionItem.total_bags), 0))
-            .join(Transaction, Transaction.id == TransactionItem.transaction_id)
-            .filter(
-                Transaction.transaction_type == TransactionType.outbound,
-                TransactionItem.brand_id == c.brand_id,
-                TransactionItem.bag_size_kg == bag_size,
-                TransactionItem.warehouse_id == warehouse_id,
-            )
-        )
-        if c.rice_type_id is not None:
-            in_q = in_q.filter(TransactionItem.rice_type_id == c.rice_type_id)
-            out_q = out_q.filter(TransactionItem.rice_type_id == c.rice_type_id)
-
-        inbound = int(in_q.scalar() or 0)
-        outbound = int(out_q.scalar() or 0)
-        remaining = max(0, inbound - outbound)
+        if s.rice_type_id is not None:
+            in_bags = in_bags.filter(TransactionItem.rice_type_id == s.rice_type_id)
+        total_inbound = int(in_bags.scalar() or 0)
+        total_outbound = max(0, total_inbound - remaining)
 
         # Resolve names
-        brand = db.query(Brand).filter(Brand.id == c.brand_id).first()
+        brand = db.query(Brand).filter(Brand.id == s.brand_id).first()
         rice_type = (
-            db.query(RiceType).filter(RiceType.id == c.rice_type_id).first()
-            if c.rice_type_id else None
+            db.query(RiceType).filter(RiceType.id == s.rice_type_id).first()
+            if s.rice_type_id else None
         )
 
-        # Try to find matching stock row (for stock_id)
-        stock_row = (
-            db.query(Stock)
+        # Weight breakdowns from StockWeightBreakdown (kept in sync by transactions)
+        breakdown_rows = (
+            db.query(StockWeightBreakdown)
             .filter(
-                Stock.brand_id == c.brand_id,
-                Stock.rice_type_id == c.rice_type_id,
-                Stock.warehouse_id == warehouse_id,
-                Stock.bag_weight_kg == bag_size,
+                StockWeightBreakdown.stock_id == s.id,
+                StockWeightBreakdown.quantity > 0,
             )
-            .first()
+            .order_by(StockWeightBreakdown.weight_kg.desc())
+            .all()
         )
-
-        # Build accurate weight breakdown for this (brand, warehouse, bag_size) combo
-        # from TransactionItemWeight rows proportionally allocated to this warehouse via splits.
-        weight_inbound_agg = (
-            db.query(
-                TransactionItemWeight.weight_kg,
-                func.coalesce(func.sum(
-                    TransactionItemWeight.quantity *
-                    TransactionItemSplit.bags /
-                    TransactionItem.total_bags
-                ), 0).label("qty"),
-            )
-            .join(TransactionItem, TransactionItem.id == TransactionItemWeight.item_id)
-            .join(TransactionItemSplit, TransactionItemSplit.item_id == TransactionItem.id)
-            .join(Transaction, Transaction.id == TransactionItem.transaction_id)
-            .filter(
-                Transaction.transaction_type == TransactionType.inbound,
-                TransactionItem.brand_id == c.brand_id,
-                TransactionItem.bag_size_kg == bag_size,
-                TransactionItemSplit.warehouse_id == warehouse_id,
-                TransactionItem.total_bags > 0,
-            )
-        )
-        if c.rice_type_id is not None:
-            weight_inbound_agg = weight_inbound_agg.filter(
-                TransactionItem.rice_type_id == c.rice_type_id
-            )
-        weight_inbound_agg = weight_inbound_agg.group_by(
-            TransactionItemWeight.weight_kg
-        ).all()
-
         weight_breakdowns = [
-            {"weight_kg": float(r.weight_kg), "quantity": max(0, int(round(float(r.qty))))}
-            for r in weight_inbound_agg
-            if round(float(r.qty)) > 0
+            {"weight_kg": float(b.weight_kg), "quantity": int(b.quantity or 0)}
+            for b in breakdown_rows
+            if (b.quantity or 0) > 0
         ]
 
         result.append({
-            "stock_id": stock_row.id if stock_row else None,
-            "brand_id": c.brand_id,
-            "rice_type_id": c.rice_type_id,
-            "brand_name": brand.name if brand else None,
-            "brand_name_ta": brand.name_ta if brand else None,
-            "rice_type": rice_type.name if rice_type else None,
-            "rice_type_ta": rice_type.name_ta if rice_type else None,
+            "stock_id": s.id,
+            "brand_id": s.brand_id,
+            "rice_type_id": s.rice_type_id,
+            "brand_name": s.brand_name or (brand.name if brand else None),
+            "brand_name_ta": s.brand_name_ta or (brand.name_ta if brand else None),
+            "rice_type": s.rice_type or (rice_type.name if rice_type else None),
+            "rice_type_ta": s.rice_type_ta or (rice_type.name_ta if rice_type else None),
             "bag_weight_kg": bag_size,
-            "total_inbound_bags": inbound,
-            "total_outbound_bags": outbound,
+            "total_inbound_bags": total_inbound,
+            "total_outbound_bags": total_outbound,
             "remaining_bags": remaining,
-            "remaining_kg": remaining * bag_size,
+            "remaining_kg": float(s.total_weight_kg or remaining * bag_size),
             "weight_breakdowns": weight_breakdowns,
         })
 
@@ -361,14 +281,18 @@ def get_weight_breakdown(
     if not w:
         raise HTTPException(status_code=404, detail="Warehouse not found")
 
-    # Use StockWeightBreakdown joined to Stock for this warehouse
+    # FIX: Filter StockWeightBreakdown to only include rows with quantity > 0
+    # so that fully-dispatched items don't inflate the summary.
     rows = (
         db.query(
             StockWeightBreakdown.weight_kg,
             func.sum(StockWeightBreakdown.quantity).label("quantity"),
         )
         .join(Stock, Stock.id == StockWeightBreakdown.stock_id)
-        .filter(Stock.warehouse_id == warehouse_id)
+        .filter(
+            Stock.warehouse_id == warehouse_id,
+            StockWeightBreakdown.quantity > 0,
+        )
         .group_by(StockWeightBreakdown.weight_kg)
         .order_by(StockWeightBreakdown.weight_kg.desc())
         .all()
@@ -377,6 +301,7 @@ def get_weight_breakdown(
     summary = [
         {"weight_kg": float(r.weight_kg), "quantity": int(r.quantity or 0)}
         for r in rows
+        if (r.quantity or 0) > 0
     ]
 
     items = (
@@ -387,7 +312,10 @@ def get_weight_breakdown(
             StockWeightBreakdown.quantity,
         )
         .join(StockWeightBreakdown, StockWeightBreakdown.stock_id == Stock.id)
-        .filter(Stock.warehouse_id == warehouse_id)
+        .filter(
+            Stock.warehouse_id == warehouse_id,
+            StockWeightBreakdown.quantity > 0,
+        )
         .all()
     )
 
