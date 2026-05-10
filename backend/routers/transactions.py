@@ -215,49 +215,67 @@ def _apply_outbound_to_stock(
     bag_size: float,
     bags: int,
     weight_kg: float,
+    rice_type_id: Optional[int] = None,
 ):
-    """Decrement stock totals and weight_breakdowns (raises if insufficient)."""
-    # Find the stock row that covers this exact weight
-    # bag_size == weight_kg for non-pooled weights; for pooled pieces bag_size may differ
-    stock = (
+    """
+    Decrement stock totals and weight_breakdowns.
+
+    BUG FIX: Previously the stock lookup was too loose — it matched any stock
+    row for brand+warehouse without filtering by rice_type_id, so if a brand
+    had multiple rice types it could pick the wrong row.  Also, the weight
+    breakdown deduction used `weight_kg` (total kg of the outbound) instead of
+    `bag_size` (the unit weight being sent), so the breakdown counter was never
+    decremented properly.
+    """
+    # Build the base query — always filter by brand + warehouse
+    q = (
         db.query(Stock)
         .filter(
             Stock.brand_id == brand_id,
             Stock.warehouse_id == warehouse_id,
+            Stock.bag_weight_kg == bag_size,
         )
-        .filter(
-            # Match by the actual weight if possible, else by bag_weight_kg
-            (Stock.bag_weight_kg == bag_size) | (Stock.bag_weight_kg == weight_kg)
-        )
-        .first()
     )
+    # Also filter by rice_type_id when provided (prevents wrong-row match)
+    if rice_type_id is not None:
+        q = q.filter(Stock.rice_type_id == rice_type_id)
+
+    stock = q.first()
+
+    # Fallback: try without bag_size filter (legacy rows may have different bag_weight_kg)
     if not stock:
-        # Last resort: any active stock for this brand/warehouse
-        stock = (
-            db.query(Stock)
-            .filter(
-                Stock.brand_id == brand_id,
-                Stock.warehouse_id == warehouse_id,
-                Stock.is_active == True,
-            )
-            .first()
+        fallback_q = db.query(Stock).filter(
+            Stock.brand_id == brand_id,
+            Stock.warehouse_id == warehouse_id,
+            Stock.is_active == True,
         )
+        if rice_type_id is not None:
+            fallback_q = fallback_q.filter(Stock.rice_type_id == rice_type_id)
+        stock = fallback_q.first()
+
     if not stock or (stock.total_bags or 0) < bags:
         available = stock.total_bags if stock else 0
         raise HTTPException(
             status_code=400,
-            detail=f"Insufficient stock for brand {brand_id} ({bag_size}KG) in warehouse {warehouse_id}. "
-                   f"Requested {bags}, available {available}."
+            detail=(
+                f"Insufficient stock for brand {brand_id} ({bag_size}KG) "
+                f"in warehouse {warehouse_id}. "
+                f"Requested {bags}, available {available}."
+            ),
         )
-    stock.total_bags -= bags
+
+    stock.total_bags = max(0, (stock.total_bags or 0) - bags)
     stock.total_weight_kg = max(0.0, (stock.total_weight_kg or 0.0) - weight_kg)
 
-    # Also decrement the matching weight_breakdown row
+    # Decrement the matching weight breakdown row.
+    # KEY FIX: match on bag_size (unit weight), NOT on the total weight_kg of
+    # the outbound.  Previously this used `weight_kg` which is bags × bag_size,
+    # so the breakdown was never found and the breakdown counter never went down.
     breakdown = (
         db.query(StockWeightBreakdown)
         .filter(
             StockWeightBreakdown.stock_id == stock.id,
-            StockWeightBreakdown.weight_kg == weight_kg,
+            StockWeightBreakdown.weight_kg == bag_size,
         )
         .first()
     )
@@ -580,30 +598,49 @@ def create_arrival(
     txn.total_bags = grand_units
     txn.total_weight_kg = grand_kg
 
-    # Check if all weight rows have buying_price (or item-level buying_price) — if so, mark complete
-    # mill_owner_name is optional; we only require that prices are entered.
+    # ── BUG FIX: Completion check for admin arrivals ──────────────────────────
+    # We must check using the in-memory item/weight objects built above (before
+    # commit) rather than re-querying, because SQLite/Postgres may not see the
+    # freshly flushed rows reliably via a new query in the same transaction.
+    # A transaction is "complete" when EVERY weight row has a buying_price
+    # (weight-level price takes priority; item-level price is an acceptable
+    # fallback).  At least one weight row must exist — an empty set is not
+    # considered fully-priced (guard against accidental auto-complete).
     if is_admin:
-        db.flush()
-        all_weights = db.query(TransactionItemWeight).join(TransactionItem).filter(
-            TransactionItem.transaction_id == txn.id
-        ).all()
-        all_items_map = {
-            it.id: it for it in db.query(TransactionItem).filter(
-                TransactionItem.transaction_id == txn.id
-            ).all()
+        db.flush()  # push pending INSERTs so IDs are available
+
+        # Re-query after flush so we get committed-in-session state
+        all_weight_rows = (
+            db.query(TransactionItemWeight)
+            .join(TransactionItem, TransactionItem.id == TransactionItemWeight.item_id)
+            .filter(TransactionItem.transaction_id == txn.id)
+            .all()
+        )
+        all_items_by_id = {
+            it.id: it
+            for it in db.query(TransactionItem)
+            .filter(TransactionItem.transaction_id == txn.id)
+            .all()
         }
-        def _is_priced(w):
+
+        def _weight_row_is_priced(w: TransactionItemWeight) -> bool:
+            # weight-level price wins
             if w.buying_price is not None:
                 return True
-            parent = all_items_map.get(w.item_id)
+            # fall back to item-level price set at arrival time
+            parent = all_items_by_id.get(w.item_id)
             return parent is not None and parent.buying_price is not None
 
-        all_priced = all(_is_priced(w) for w in all_weights) if all_weights else False
-        if all_priced:
+        # Only mark complete when there is at least one weight row AND all are priced
+        if all_weight_rows and all(_weight_row_is_priced(w) for w in all_weight_rows):
             txn.admin_pending = False
             txn.approval_status = ApprovalStatus.completed
             txn.completed_by = current_user.id
             txn.completed_at = datetime.utcnow()
+        else:
+            # Explicitly keep pending (was already set above, but be explicit)
+            txn.admin_pending = True
+            txn.approval_status = ApprovalStatus.pending
 
     db.commit()
     return _load_full_transaction(db, txn.id)
@@ -675,6 +712,8 @@ def create_send(
         weight_kg = bags * bag_size
 
         # Decrement stock (also validates availability)
+        # Pass rice_type_id so the correct stock row is decremented when a brand
+        # has multiple rice types in the same warehouse.
         _apply_outbound_to_stock(
             db,
             brand_id=item.brand_id,
@@ -682,6 +721,7 @@ def create_send(
             bag_size=bag_size,
             bags=bags,
             weight_kg=weight_kg,
+            rice_type_id=getattr(item, "rice_type_id", None),
         )
 
         ti = TransactionItem(
@@ -1135,6 +1175,23 @@ def delete_transaction(
             if stock:
                 stock.total_bags = (stock.total_bags or 0) + (item.total_bags or 0)
                 stock.total_weight_kg = (stock.total_weight_kg or 0.0) + (item.total_weight_kg or 0)
+                # Restore weight breakdown using bag_size (unit weight), not total weight_kg
+                bd = (
+                    db.query(StockWeightBreakdown)
+                    .filter(
+                        StockWeightBreakdown.stock_id == stock.id,
+                        StockWeightBreakdown.weight_kg == bag_size,
+                    )
+                    .first()
+                )
+                if bd:
+                    bd.quantity = (bd.quantity or 0) + (item.total_bags or 0)
+                else:
+                    db.add(StockWeightBreakdown(
+                        stock_id=stock.id,
+                        weight_kg=bag_size,
+                        quantity=item.total_bags or 0,
+                    ))
 
     db.delete(tx)
     db.commit()

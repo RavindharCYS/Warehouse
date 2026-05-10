@@ -111,8 +111,8 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
   const [loading, setLoading] = useState(false);
 
   // Build weight rows for display — flatten items × weights
-  // For arrival: only show rows where buying_price is NOT yet filled (at weight OR item level, OR already in our local map)
-  // For send: only show rows where selling_price is NOT yet filled
+  // For arrival: show ALL rows; already-priced ones are read-only (green), unfilled ones are editable
+  // For send: same logic for selling prices
   const allWeightRows = useMemo(() => {
     const rows = [];
     (tx.items || []).forEach(it => {
@@ -124,17 +124,18 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
       weights.forEach(w => {
         const isPiece = w.weight_kg < 25;
         const key = `${it.id}__${w.weight_kg}`;
-        // A weight row is considered "already priced" if:
-        //   1. The weight row itself has a buying_price saved on the backend, OR
-        //   2. The parent item has a buying_price (set at arrival time by admin), OR
-        //   3. We already have a value in our local price map for this key (saved in a prior admin-fields call)
         const existingBuyPrice  = w.buying_price ?? it.buying_price ?? null;
         const existingSellPrice = w.selling_price ?? it.selling_price ?? null;
         const alreadyInBuyMap   = weightBuyingPrices[key] != null && weightBuyingPrices[key] !== "";
         const alreadyInSellMap  = weightSellingPrices[key] != null && weightSellingPrices[key] !== "";
 
-        if (isArrival && (existingBuyPrice != null || alreadyInBuyMap)) return;
-        if (!isArrival && (existingSellPrice != null || alreadyInSellMap)) return;
+        // BUG FIX: Previously rows with existing prices were filtered OUT entirely.
+        // Now we include ALL rows but mark already-priced ones as readOnly so
+        // the admin can see what was already entered (for reference) alongside
+        // the rows still needing input.
+        const isBuyFilled  = existingBuyPrice != null || alreadyInBuyMap;
+        const isSellFilled = existingSellPrice != null || alreadyInSellMap;
+
         rows.push({
           itemId: it.id,
           brandLabel,
@@ -146,11 +147,13 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
           existingBuyPrice,
           existingSellPrice,
           key,
+          isBuyFilled,
+          isSellFilled,
         });
       });
     });
     return rows;
-  }, [tx, isArrival, weightBuyingPrices, weightSellingPrices]);
+  }, [tx, weightBuyingPrices, weightSellingPrices]);
 
   const handleSave = async () => {
     const data = {};
@@ -161,20 +164,20 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
       if (rent !== "")              data.rent = parseFloat(rent);
       if (hiddenCharges !== "")     data.hidden_charges = parseFloat(hiddenCharges);
 
-      // Build per-item buying prices from weight rows
-      const itemBuyingPrices = {};
-      Object.entries(weightBuyingPrices).forEach(([key, val]) => {
-        if (!val || parseFloat(val) <= 0) return;
-        const [itemIdStr] = key.split("__");
-        // Use last entered value per item (if multiple weights, we store per-weight on the backend)
-        itemBuyingPrices[itemIdStr] = parseFloat(val);
-      });
+      // Only submit buying prices for rows that are NOT already filled on the backend.
+      // This avoids accidentally overwriting existing prices with the seeded values
+      // and prevents sending empty strings for rows the admin hasn't touched yet.
+      const unfilledKeys = new Set(
+        allWeightRows.filter(r => !r.isBuyFilled).map(r => r.key)
+      );
 
-      // Also build weight-level prices map: { item_id: { weight_kg: price } }
+      const itemBuyingPrices = {};
       const weightPrices = {};
       Object.entries(weightBuyingPrices).forEach(([key, val]) => {
+        if (!unfilledKeys.has(key)) return; // skip already-filled rows
         if (!val || parseFloat(val) <= 0) return;
         const [itemIdStr, wkgStr] = key.split("__");
+        itemBuyingPrices[itemIdStr] = parseFloat(val);
         if (!weightPrices[itemIdStr]) weightPrices[itemIdStr] = {};
         weightPrices[itemIdStr][wkgStr] = parseFloat(val);
       });
@@ -184,7 +187,10 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
         data.item_weight_prices = weightPrices;
       }
 
-      if (!data.mill_owner_name && Object.keys(itemBuyingPrices).length === 0 && !data.rent && allWeightRows.length === 0) {
+      // Count truly unfilled rows to decide if save is valid
+      const stillUnfilled = allWeightRows.filter(r => !r.isBuyFilled);
+      const newPricesEntered = Object.keys(itemBuyingPrices).length > 0;
+      if (!data.mill_owner_name && !newPricesEntered && !data.rent && stillUnfilled.length > 0) {
         toast.error("Enter at least Mill Owner or one buying price to save");
         return;
       }
@@ -192,9 +198,15 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
       if (toWhom.trim())   data.commission_partner = toWhom.trim();
       if (location.trim()) data.location = location.trim();
 
+      // Only submit selling prices for rows that are NOT already filled
+      const unfilledKeys = new Set(
+        allWeightRows.filter(r => !r.isSellFilled).map(r => r.key)
+      );
+
       const itemSellingPrices = {};
       const weightPrices = {};
       Object.entries(weightSellingPrices).forEach(([key, val]) => {
+        if (!unfilledKeys.has(key)) return; // skip already-filled rows
         if (!val || parseFloat(val) <= 0) return;
         const [itemIdStr, wkgStr] = key.split("__");
         itemSellingPrices[itemIdStr] = parseFloat(val);
@@ -306,16 +318,49 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
             </div>
           )}
 
-          {/* Per-weight buying prices — only unfilled rows shown */}
-          {allWeightRows.length > 0 ? (
-            <div>
-              <p className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: "#6366f1" }}>
-                Buying Price per Weight
-              </p>
+          {/* Per-weight buying prices — filled rows shown in green, unfilled as editable */}
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: "#6366f1" }}>
+              Buying Price per Weight
+            </p>
+            {allWeightRows.length === 0 ? (
+              <div className="px-3 py-2 rounded-lg text-xs" style={{ backgroundColor: "var(--success-soft)", color: "var(--success)" }}>
+                ✓ All buying prices are already filled for this transaction.
+              </div>
+            ) : (
               <div className="space-y-2">
                 {allWeightRows.map(row => {
                   const val = weightBuyingPrices[row.key] ?? "";
-                  const total = val && row.quantity ? (parseFloat(val) * row.quantity).toFixed(2) : null;
+                  const filledPrice = row.isBuyFilled ? (row.existingBuyPrice ?? (val ? parseFloat(val) : null)) : null;
+                  const displayVal = row.isBuyFilled ? (filledPrice != null ? String(filledPrice) : val) : val;
+                  const total = displayVal && row.quantity ? (parseFloat(displayVal) * row.quantity).toFixed(2) : null;
+
+                  if (row.isBuyFilled) {
+                    // Already priced — show as read-only green reference row
+                    return (
+                      <div key={row.key} className="rounded-xl px-3 py-2 flex items-center justify-between gap-2"
+                        style={{ backgroundColor: "var(--success-soft)", border: "1px solid rgba(16,185,129,0.3)" }}>
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="text-[10px] font-bold" style={{ color: "var(--success)" }}>✓</span>
+                          <span className="text-xs font-semibold truncate" style={{ color: "var(--text-primary)" }}>
+                            {row.brandLabel}
+                            {row.typeLabel && <span className="font-normal opacity-70"> · {row.typeLabel}</span>}
+                          </span>
+                          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded shrink-0"
+                            style={{ backgroundColor: row.isPiece ? "var(--warning-soft)" : "rgba(16,185,129,0.15)",
+                                     color: row.isPiece ? "var(--warning)" : "var(--success)" }}>
+                            {row.weight_kg}KG · {row.quantity} {row.unitLabel}{row.quantity !== 1 ? "s" : ""}
+                          </span>
+                        </div>
+                        <span className="text-xs font-bold shrink-0" style={{ color: "var(--success)" }}>
+                          ₹{filledPrice ?? "—"}
+                          {total && <span className="font-normal opacity-70 ml-1">= ₹{total}</span>}
+                        </span>
+                      </div>
+                    );
+                  }
+
+                  // Not yet priced — show editable input
                   return (
                     <div key={row.key} className="rounded-xl p-3 space-y-2"
                       style={{ backgroundColor: "rgba(99,102,241,0.04)", border: "1px dashed rgba(99,102,241,0.25)" }}>
@@ -348,12 +393,8 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
                   );
                 })}
               </div>
-            </div>
-          ) : (
-            <div className="px-3 py-2 rounded-lg text-xs" style={{ backgroundColor: "var(--success-soft)", color: "var(--success)" }}>
-              ✓ All buying prices are already filled for this transaction.
-            </div>
-          )}
+            )}
+          </div>
         </>
       ) : (
         <>
@@ -381,16 +422,51 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
             </div>
           )}
 
-          {/* Per-weight selling prices — only unfilled rows shown */}
-          {allWeightRows.length > 0 ? (
-            <div>
-              <p className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: "#ef4444" }}>
-                Selling Price per Weight *
-              </p>
+          {/* Per-weight selling prices — filled rows shown in green, unfilled as editable */}
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: "#ef4444" }}>
+              Selling Price per Weight *
+            </p>
+            {allWeightRows.length === 0 ? (
+              <div className="px-3 py-2 rounded-lg text-xs" style={{ backgroundColor: "var(--success-soft)", color: "var(--success)" }}>
+                ✓ All selling prices are already filled for this transaction.
+              </div>
+            ) : (
               <div className="space-y-2">
                 {allWeightRows.map(row => {
                   const val = weightSellingPrices[row.key] ?? "";
                   const buyP = row.existingBuyPrice;
+
+                  if (row.isSellFilled) {
+                    // Already priced — read-only green reference row
+                    const filledSell = row.existingSellPrice ?? (val ? parseFloat(val) : null);
+                    const diff = filledSell != null && buyP != null ? filledSell - buyP : null;
+                    const col = diff == null ? "var(--success)" : diff > 0 ? "var(--success)" : diff < 0 ? "var(--danger)" : "var(--text-muted)";
+                    return (
+                      <div key={row.key} className="rounded-xl px-3 py-2 flex items-center justify-between gap-2"
+                        style={{ backgroundColor: "var(--success-soft)", border: "1px solid rgba(16,185,129,0.3)" }}>
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="text-[10px] font-bold" style={{ color: "var(--success)" }}>✓</span>
+                          <span className="text-xs font-semibold truncate" style={{ color: "var(--text-primary)" }}>
+                            {row.brandLabel}
+                            {row.typeLabel && <span className="font-normal opacity-70"> · {row.typeLabel}</span>}
+                          </span>
+                          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded shrink-0"
+                            style={{ backgroundColor: "rgba(16,185,129,0.15)", color: "var(--success)" }}>
+                            {row.weight_kg}KG · {row.quantity} {row.unitLabel}{row.quantity !== 1 ? "s" : ""}
+                          </span>
+                        </div>
+                        <span className="text-xs font-bold shrink-0" style={{ color: col }}>
+                          ₹{filledSell ?? "—"}
+                          {diff != null && (
+                            <span className="ml-1 text-[10px]">({diff > 0 ? "+" : ""}{diff.toFixed(2)})</span>
+                          )}
+                        </span>
+                      </div>
+                    );
+                  }
+
+                  // Not yet priced — editable
                   const diff = val && buyP != null ? (parseFloat(val) - buyP) : null;
                   const col = diff == null ? "var(--text-muted)" : diff > 0 ? "var(--success)" : diff < 0 ? "var(--danger)" : "var(--text-muted)";
                   const bg  = diff == null ? "transparent" : diff > 0 ? "var(--success-soft)" : diff < 0 ? "var(--danger-soft)" : "transparent";
@@ -443,12 +519,8 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
                   );
                 })}
               </div>
-            </div>
-          ) : (
-            <div className="px-3 py-2 rounded-lg text-xs" style={{ backgroundColor: "var(--success-soft)", color: "var(--success)" }}>
-              ✓ All selling prices are already filled for this transaction.
-            </div>
-          )}
+            )}
+          </div>
         </>
       )}
 

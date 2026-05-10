@@ -1211,10 +1211,18 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks }) {
       }
     ));
 
-  const stocksWithQty = useMemo(
-    () => stocks.filter(s => (s.remaining_bags ?? s.total_bags ?? 0) > 0),
-    [stocks]
-  );
+  // BUG FIX: A stock row is only "available" if it has actual remaining quantity.
+  // Use weight_breakdowns sum when available (most accurate after outbound),
+  // otherwise fall back to remaining_bags / total_bags.
+  const stocksWithQty = useMemo(() => {
+    return stocks.filter(s => {
+      if (s.weight_breakdowns && s.weight_breakdowns.length > 0) {
+        // sum up breakdown quantities — this reflects actual deducted stock
+        return s.weight_breakdowns.some(wb => (wb.quantity || 0) > 0);
+      }
+      return (s.remaining_bags ?? s.total_bags ?? 0) > 0;
+    });
+  }, [stocks]);
 
   const brandsWithStock = useMemo(() => {
     const bIds = new Set(stocksWithQty.map(s => String(s.brand_id ?? s.brand?.id)));
@@ -1223,6 +1231,7 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks }) {
 
   const warehousesForGroup = brandId => {
     if (!brandId) return [];
+    // Only include warehouses that actually have remaining stock for this brand
     const wIds = new Set(
       stocksWithQty
         .filter(s => String(s.brand_id ?? s.brand?.id) === String(brandId))
@@ -1231,7 +1240,10 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks }) {
     return warehouses.filter(w => wIds.has(w.id));
   };
 
-  // Returns available weight rows for a brand+warehouse
+  // Returns available weight rows for a brand+warehouse.
+  // BUG FIX: Previously it read wb.quantity from weight_breakdowns which was
+  // never decremented on outbound (fixed in backend).  The display logic is
+  // also fixed here to always trust weight_breakdowns > 0 only.
   const weightRowsForGroup = (brandId, warehouseId) => {
     if (!brandId || !warehouseId) return [];
     const matchingStocks = stocksWithQty.filter(
@@ -1243,20 +1255,23 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks }) {
       const remaining = s.remaining_bags ?? s.total_bags ?? 0;
       if (s.weight_breakdowns && s.weight_breakdowns.length > 0) {
         for (const wb of s.weight_breakdowns) {
-          if ((wb.quantity || 0) <= 0) continue;
+          const qty = wb.quantity || 0;
+          if (qty <= 0) continue; // skip fully-exhausted weight rows
+          const prev = weightMap.get(wb.weight_kg);
           weightMap.set(wb.weight_kg, {
             weight_kg: wb.weight_kg,
-            qty: (weightMap.get(wb.weight_kg)?.qty || 0) + wb.quantity,
-            last_buy_price: s.last_buy_price ?? null,
+            qty: (prev?.qty || 0) + qty,
+            last_buy_price: s.last_buy_price ?? prev?.last_buy_price ?? null,
             isPiece: wb.weight_kg < 25,
           });
         }
       } else if (remaining > 0) {
         const wkg = s.bag_weight_kg;
+        const prev = weightMap.get(wkg);
         weightMap.set(wkg, {
           weight_kg: wkg,
-          qty: (weightMap.get(wkg)?.qty || 0) + remaining,
-          last_buy_price: s.last_buy_price ?? null,
+          qty: (prev?.qty || 0) + remaining,
+          last_buy_price: s.last_buy_price ?? prev?.last_buy_price ?? null,
           isPiece: wkg < 25,
         });
       }
