@@ -530,15 +530,26 @@ def create_arrival(
                 total_bags=total_units,
                 total_weight_kg=total_kg,
             )
+            
             if is_admin:
                 if item.buying_price is not None:
                     ti.buying_price = item.buying_price
+            
+                elif payload.price is not None:
+                    ti.buying_price = payload.price
+            
                 else:
-                    row_prices = [e.buying_price for e in item.entries if e.buying_price is not None]
+                    row_prices = [
+                        e.buying_price
+                        for e in item.entries
+                        if e.buying_price is not None
+                    ]
+            
                     if row_prices:
                         unique = set(row_prices)
                         if len(unique) == 1:
                             ti.buying_price = row_prices[0]
+            
             db.add(ti)
             db.flush()
 
@@ -627,15 +638,26 @@ def create_arrival(
                 total_bags=total_units,
                 total_weight_kg=total_kg,
             )
+            
             if is_admin:
                 if item.buying_price is not None:
                     ti.buying_price = item.buying_price
+            
+                elif payload.price is not None:
+                    ti.buying_price = payload.price
+            
                 else:
-                    row_prices = [w.buying_price for w in item.weights if w.buying_price is not None]
+                    row_prices = [
+                        w.buying_price
+                        for w in item.weights
+                        if w.buying_price is not None
+                    ]
+            
                     if row_prices:
                         unique = set(row_prices)
                         if len(unique) == 1:
                             ti.buying_price = row_prices[0]
+                            
             db.add(ti)
             db.flush()
 
