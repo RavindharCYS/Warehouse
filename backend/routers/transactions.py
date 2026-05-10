@@ -385,13 +385,15 @@ def list_transactions(
     if filter == "pending":
         q = q.filter(Transaction.admin_pending == True)  # noqa: E712
 
-    return (
+    transactions = (
         q.order_by(Transaction.transaction_date.desc())
         .distinct()
         .offset(offset)
         .limit(limit)
         .all()
     )
+    
+    return [TransactionOut.model_validate(tx) for tx in transactions]
 
 
 # ============================================================

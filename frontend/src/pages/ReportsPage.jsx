@@ -205,8 +205,7 @@ export default function ReportsPage() {
         ];
         const rows = transactions.map((tx) => {
           const isIn = tx.transaction_type === "inbound";
-          const pl = tx.price != null && tx.sell_price != null
-            ? (Number(tx.sell_price) - Number(tx.price)).toFixed(2) : "";
+          const pl = tx.profit_loss != null ? Number(tx.profit_loss).toFixed(2) : "";
           return [
             new Date(tx.transaction_date).toLocaleString(),
             isIn ? "Arrival" : "Send",
@@ -408,31 +407,12 @@ export default function ReportsPage() {
     let inbound = 0, outbound = 0, profit = 0, hasPL = false;
     transactions.forEach((tx) => {
       const bags = txBags(tx);
-      if (tx.transaction_type === "inbound") inbound += bags;
-      else {
+      if (tx.transaction_type === "inbound") {
+        inbound += bags;
+      } else {
         outbound += bags;
-        // Prefer per-item prices (modern transactions); fall back to legacy global price fields
-        const itemsWithBoth = (tx.items || []).filter(
-          it => it.buying_price != null && it.selling_price != null
-        );
-        if (itemsWithBoth.length > 0) {
-          itemsWithBoth.forEach(it => {
-            const itBags = it.total_bags || 0;
-            // Check per-weight prices first
-            const weightsWithBoth = (it.weights || []).filter(
-              w => w.buying_price != null && w.selling_price != null
-            );
-            if (weightsWithBoth.length > 0) {
-              weightsWithBoth.forEach(w => {
-                profit += (Number(w.selling_price) - Number(w.buying_price)) * (w.quantity || 0);
-              });
-            } else {
-              profit += (Number(it.selling_price) - Number(it.buying_price)) * itBags;
-            }
-          });
-          hasPL = true;
-        } else if (tx.price != null && tx.sell_price != null) {
-          profit += (Number(tx.sell_price) - Number(tx.price)) * bags;
+        if (tx.profit_loss != null) {
+          profit += Number(tx.profit_loss);
           hasPL = true;
         }
       }
@@ -1276,8 +1256,7 @@ export default function ReportsPage() {
             <div className="md:hidden space-y-1.5">
               {transactions.slice(0, 50).map((tx) => {
                 const isInbound = tx.transaction_type === "inbound";
-                const diff = (tx.price != null && tx.sell_price != null)
-                  ? Number(tx.sell_price) - Number(tx.price) : null;
+                const diff = tx.profit_loss ?? null;
                 return (
                   <div
                     key={tx.id}
@@ -1319,7 +1298,7 @@ export default function ReportsPage() {
                                 padding: "1px 5px",
                               }}
                             >
-                              {diff > 0 ? "+" : ""}{diff.toFixed(0)}
+                              {diff > 0 ? "+" : ""}{Number(diff).toFixed(0)}
                             </span>
                           )}
                         </div>
@@ -1386,8 +1365,7 @@ export default function ReportsPage() {
                 <tbody>
                   {transactions.slice(0, 100).map((tx) => {
                     const isInbound = tx.transaction_type === "inbound";
-                    const diff = (tx.price != null && tx.sell_price != null)
-                      ? Number(tx.sell_price) - Number(tx.price) : null;
+                    const diff = tx.profit_loss ?? null;
                     return (
                       <tr key={tx.id}>
                         <td className="text-xs tabular-nums">
@@ -1427,7 +1405,7 @@ export default function ReportsPage() {
                                     : diff < 0 ? "var(--danger)" : "var(--text-primary)",
                                 }}
                               >
-                                {diff > 0 ? "+" : ""}{diff.toFixed(2)}
+                                {diff > 0 ? "+" : ""}{Number(diff).toFixed(2)}
                               </span>
                             ) : (
                               <span style={{ color: "var(--text-muted)" }}>—</span>
