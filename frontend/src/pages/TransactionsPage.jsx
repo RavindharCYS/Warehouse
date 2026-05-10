@@ -126,15 +126,12 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
         const key = `${it.id}__${w.weight_kg}`;
         const existingBuyPrice  = w.buying_price ?? it.buying_price ?? null;
         const existingSellPrice = w.selling_price ?? it.selling_price ?? null;
-        const alreadyInBuyMap   = weightBuyingPrices[key] != null && weightBuyingPrices[key] !== "";
-        const alreadyInSellMap  = weightSellingPrices[key] != null && weightSellingPrices[key] !== "";
-
-        // BUG FIX: Previously rows with existing prices were filtered OUT entirely.
-        // Now we include ALL rows but mark already-priced ones as readOnly so
-        // the admin can see what was already entered (for reference) alongside
-        // the rows still needing input.
-        const isBuyFilled  = existingBuyPrice != null || alreadyInBuyMap;
-        const isSellFilled = existingSellPrice != null || alreadyInSellMap;
+        // isBuyFilled / isSellFilled must only reflect prices that were already
+        // persisted on the server — NOT what the user has typed locally so far.
+        // Using alreadyInBuyMap here caused rows to flip to read-only green the
+        // moment the user typed a single character, before they could hit Save.
+        const isBuyFilled  = existingBuyPrice != null;
+        const isSellFilled = existingSellPrice != null;
 
         rows.push({
           itemId: it.id,
