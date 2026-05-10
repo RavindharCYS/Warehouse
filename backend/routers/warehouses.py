@@ -573,8 +573,35 @@ def create_warehouse(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ):
-    if db.query(Warehouse).filter(Warehouse.location_name == payload.location_name).first():
-        raise HTTPException(status_code=400, detail="Warehouse name already exists")
+    existing = (
+        db.query(Warehouse)
+        .filter(Warehouse.location_name == payload.location_name)
+        .first()
+    )
+
+    if existing:
+        if existing.is_active:
+            # A live warehouse with this name already exists — reject.
+            raise HTTPException(status_code=400, detail="Warehouse name already exists")
+
+        # ── REACTIVATE soft-deleted warehouse ──────────────────────────────
+        # The old row keeps its original id, so every Stock row,
+        # TransactionItemSplit, and TransactionItem that was linked to it
+        # automatically becomes visible again with its full history intact.
+        # Creating a brand-new row would give a different id and leave all
+        # historical data orphaned on the dead id.
+        existing.is_active = True
+        if payload.location_name_ta is not None:
+            existing.location_name_ta = payload.location_name_ta
+        if payload.address is not None:
+            existing.address = payload.address
+        if payload.capacity:
+            existing.capacity = payload.capacity
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    # Truly new name — insert a fresh row.
     warehouse = Warehouse(**payload.model_dump())
     db.add(warehouse)
     db.commit()
