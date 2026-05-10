@@ -19,7 +19,7 @@ from schemas import (
     CustomQualityGradeOut, CustomQualityGradeCreate,
     ArrivalCreate, SendCreate,
     AdminInboundFields, AdminOutboundFields,
-    ProfitLossOut, TransactionCreate,
+    ProfitLossOut, TransactionCreate, ArrivalItemEntry,
 )
 from utils.deps import get_current_user
 
@@ -488,109 +488,205 @@ def create_arrival(
         if bag_size not in VALID_BAG_SIZES:
             raise HTTPException(status_code=400, detail=f"Item {idx}: bag_size must be 25 or 26")
 
-        weights_data = [{"weight": w.weight, "quantity": w.quantity} for w in item.weights or []]
-        if not weights_data:
-            raise HTTPException(status_code=400, detail=f"Item {idx}: At least one weight row is required")
+        # ── Choose processing path ────────────────────────────────────────────────
+        # NEW PATH  : item.entries is present — each row carries its own warehouse_id.
+        #             Stock is applied with exact quantities; no proportional math.
+        # LEGACY PATH: item.weights + item.warehouse_splits — kept for backward
+        #             compatibility with older clients that do not send entries[].
+        use_entries = bool(item.entries)
 
-        total_kg = _calc_total_kg(weights_data)
+        if use_entries:
+            # ── NEW PATH: per-row entries with explicit warehouse_id ─────────────
+            from collections import defaultdict
 
-        # ── NEW UNIT LOGIC: count both bags (≥25kg) and pieces (<25kg) ──
-        total_units, total_bag_units, total_piece_units, unit_err = _calc_units_from_rows(weights_data)
-        if unit_err:
-            raise HTTPException(status_code=400, detail=f"Item {idx}: {unit_err}")
-        if total_units == 0:
-            raise HTTPException(status_code=400, detail=f"Item {idx}: No valid entries (need weight > 0 and qty > 0)")
+            # Validate all warehouses up front (one query per unique warehouse)
+            seen_wh_ids = {e.warehouse_id for e in item.entries}
+            for wh_id in seen_wh_ids:
+                wh = db.query(Warehouse).filter(
+                    Warehouse.id == wh_id,
+                    Warehouse.is_active == True
+                ).first()
+                if not wh:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Item {idx}: Warehouse {wh_id} not found"
+                    )
 
-        # Validate splits
-        if not item.warehouse_splits:
-            raise HTTPException(status_code=400, detail=f"Item {idx}: warehouse_splits required")
+            # Aggregate all entries for item-level totals
+            weights_data = [{"weight": float(e.weight), "quantity": int(e.quantity)} for e in item.entries]
+            total_kg = _calc_total_kg(weights_data)
+            total_units, total_bag_units, total_piece_units, unit_err = _calc_units_from_rows(weights_data)
+            if unit_err:
+                raise HTTPException(status_code=400, detail=f"Item {idx}: {unit_err}")
+            if total_units == 0:
+                raise HTTPException(status_code=400, detail=f"Item {idx}: No valid entries (need weight > 0 and qty > 0)")
 
-        split_total = sum(int(s.bags) for s in item.warehouse_splits)
-        if split_total != total_units:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Item {idx}: Warehouse split sum ({split_total}) "
-                    f"≠ total units ({total_units} = {total_bag_units} bags + {total_piece_units} pieces)"
-                )
-            )
-
-        # Create item header
-        ti = TransactionItem(
-            transaction_id=txn.id,
-            brand_id=item.brand_id,
-            rice_type_id=item.rice_type_id,
-            bag_size_kg=bag_size,
-            total_bags=total_units,        # store as units
-            total_weight_kg=total_kg,
-        )
-        # Per-item buying price (admin only)
-        # Use explicit item.buying_price if provided; otherwise derive from weight rows
-        if is_admin:
-            if item.buying_price is not None:
-                ti.buying_price = item.buying_price
-            else:
-                # Collect per-weight prices; if all same → set as item-level price
-                row_prices = [w.buying_price for w in item.weights if w.buying_price is not None]
-                if row_prices:
-                    unique = set(row_prices)
-                    if len(unique) == 1:
-                        ti.buying_price = row_prices[0]
-        db.add(ti)
-        db.flush()
-
-        # Save weight rows verbatim (with per-weight buying_price if provided)
-        for w in item.weights:
-            db.add(TransactionItemWeight(
-                item_id=ti.id,
-                weight_kg=float(w.weight),
-                quantity=int(w.quantity),
-                buying_price=float(w.buying_price) if (is_admin and w.buying_price is not None) else None,
-            ))
-
-        # Save splits + apply to stock
-        for s in item.warehouse_splits:
-            wh = db.query(Warehouse).filter(
-                Warehouse.id == s.warehouse_id,
-                Warehouse.is_active == True
-            ).first()
-            if not wh:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Item {idx}: Warehouse {s.warehouse_id} not found"
-                )
-
-            split_units = int(s.bags)
-            # Proportional weight allocation for this split
-            split_weight = round((split_units / total_units) * total_kg, 4) if total_units else 0.0
-
-            db.add(TransactionItemSplit(
-                item_id=ti.id,
-                warehouse_id=s.warehouse_id,
-                bags=split_units,
-                weight_kg=split_weight,
-            ))
-
-            # Scale weight breakdown proportionally for this warehouse
-            split_breakdown = [
-                {
-                    "weight": w["weight"],
-                    "quantity": int(round((split_units / total_units) * w["quantity"]))
-                    if total_units else 0
-                }
-                for w in weights_data
-            ]
-
-            _apply_inbound_to_stock(
-                db,
+            # Create item header
+            ti = TransactionItem(
+                transaction_id=txn.id,
                 brand_id=item.brand_id,
                 rice_type_id=item.rice_type_id,
-                warehouse_id=s.warehouse_id,
-                bag_size=bag_size,
-                units=split_units,
-                weight_kg=split_weight,
-                weight_breakdown=split_breakdown,
+                bag_size_kg=bag_size,
+                total_bags=total_units,
+                total_weight_kg=total_kg,
             )
+            if is_admin:
+                if item.buying_price is not None:
+                    ti.buying_price = item.buying_price
+                else:
+                    row_prices = [e.buying_price for e in item.entries if e.buying_price is not None]
+                    if row_prices:
+                        unique = set(row_prices)
+                        if len(unique) == 1:
+                            ti.buying_price = row_prices[0]
+            db.add(ti)
+            db.flush()
+
+            # Save aggregated weight rows (collapsed by weight value) for display
+            weight_agg: dict = {}
+            weight_price_agg: dict = {}
+            for e in item.entries:
+                wt = float(e.weight)
+                weight_agg[wt] = weight_agg.get(wt, 0) + int(e.quantity)
+                if is_admin and e.buying_price is not None:
+                    weight_price_agg[wt] = float(e.buying_price)
+            for wt, qty in weight_agg.items():
+                db.add(TransactionItemWeight(
+                    item_id=ti.id,
+                    weight_kg=wt,
+                    quantity=qty,
+                    buying_price=weight_price_agg.get(wt) if is_admin else None,
+                ))
+
+            # Group entries by warehouse — exact quantities, zero rounding error
+            wh_rows: dict = defaultdict(list)
+            for e in item.entries:
+                wh_rows[e.warehouse_id].append({
+                    "weight": float(e.weight),
+                    "quantity": int(e.quantity),
+                })
+
+            for wh_id, rows in wh_rows.items():
+                split_units, _, _, _ = _calc_units_from_rows(rows)
+                split_weight = round(_calc_total_kg(rows), 4)
+
+                db.add(TransactionItemSplit(
+                    item_id=ti.id,
+                    warehouse_id=wh_id,
+                    bags=split_units,
+                    weight_kg=split_weight,
+                ))
+
+                # Use the exact rows for this warehouse — no proportional scaling
+                _apply_inbound_to_stock(
+                    db,
+                    brand_id=item.brand_id,
+                    rice_type_id=item.rice_type_id,
+                    warehouse_id=wh_id,
+                    bag_size=bag_size,
+                    units=split_units,
+                    weight_kg=split_weight,
+                    weight_breakdown=rows,
+                )
+
+        else:
+            # ── LEGACY PATH: flat weights[] + warehouse_splits[] ─────────────────
+            # Kept for backward compatibility. Uses proportional allocation which
+            # may introduce rounding drift for mixed bag/piece items, but existing
+            # integrations that omit entries[] are not broken.
+            weights_data = [{"weight": w.weight, "quantity": w.quantity} for w in (item.weights or [])]
+            if not weights_data:
+                raise HTTPException(status_code=400, detail=f"Item {idx}: At least one weight row is required")
+
+            total_kg = _calc_total_kg(weights_data)
+            total_units, total_bag_units, total_piece_units, unit_err = _calc_units_from_rows(weights_data)
+            if unit_err:
+                raise HTTPException(status_code=400, detail=f"Item {idx}: {unit_err}")
+            if total_units == 0:
+                raise HTTPException(status_code=400, detail=f"Item {idx}: No valid entries (need weight > 0 and qty > 0)")
+
+            if not item.warehouse_splits:
+                raise HTTPException(status_code=400, detail=f"Item {idx}: warehouse_splits required")
+
+            split_total = sum(int(s.bags) for s in item.warehouse_splits)
+            if split_total != total_units:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Item {idx}: Warehouse split sum ({split_total}) "
+                        f"≠ total units ({total_units} = {total_bag_units} bags + {total_piece_units} pieces)"
+                    )
+                )
+
+            # Create item header
+            ti = TransactionItem(
+                transaction_id=txn.id,
+                brand_id=item.brand_id,
+                rice_type_id=item.rice_type_id,
+                bag_size_kg=bag_size,
+                total_bags=total_units,
+                total_weight_kg=total_kg,
+            )
+            if is_admin:
+                if item.buying_price is not None:
+                    ti.buying_price = item.buying_price
+                else:
+                    row_prices = [w.buying_price for w in item.weights if w.buying_price is not None]
+                    if row_prices:
+                        unique = set(row_prices)
+                        if len(unique) == 1:
+                            ti.buying_price = row_prices[0]
+            db.add(ti)
+            db.flush()
+
+            for w in item.weights:
+                db.add(TransactionItemWeight(
+                    item_id=ti.id,
+                    weight_kg=float(w.weight),
+                    quantity=int(w.quantity),
+                    buying_price=float(w.buying_price) if (is_admin and w.buying_price is not None) else None,
+                ))
+
+            for s in item.warehouse_splits:
+                wh = db.query(Warehouse).filter(
+                    Warehouse.id == s.warehouse_id,
+                    Warehouse.is_active == True
+                ).first()
+                if not wh:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Item {idx}: Warehouse {s.warehouse_id} not found"
+                    )
+
+                split_units = int(s.bags)
+                split_weight = round((split_units / total_units) * total_kg, 4) if total_units else 0.0
+
+                db.add(TransactionItemSplit(
+                    item_id=ti.id,
+                    warehouse_id=s.warehouse_id,
+                    bags=split_units,
+                    weight_kg=split_weight,
+                ))
+
+                split_breakdown = [
+                    {
+                        "weight": w["weight"],
+                        "quantity": int(round((split_units / total_units) * w["quantity"]))
+                        if total_units else 0
+                    }
+                    for w in weights_data
+                ]
+
+                _apply_inbound_to_stock(
+                    db,
+                    brand_id=item.brand_id,
+                    rice_type_id=item.rice_type_id,
+                    warehouse_id=s.warehouse_id,
+                    bag_size=bag_size,
+                    units=split_units,
+                    weight_kg=split_weight,
+                    weight_breakdown=split_breakdown,
+                )
 
         grand_units += total_units
         grand_kg += total_kg

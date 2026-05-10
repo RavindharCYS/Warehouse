@@ -363,6 +363,33 @@ class WeightRow(BaseModel):
         return v
 
 
+class ArrivalItemEntry(BaseModel):
+    """
+    Per-row entry with an explicit warehouse_id.
+    This is the preferred (new) format sent by the frontend.
+    Each row carries its own warehouse assignment so the backend
+    can apply exact stock quantities without any proportional math.
+    """
+    weight: float
+    quantity: int
+    warehouse_id: int
+    buying_price: Optional[float] = None  # admin only
+
+    @field_validator("weight")
+    @classmethod
+    def _weight_positive(cls, v):
+        if v <= 0:
+            raise ValueError("weight must be > 0")
+        return v
+
+    @field_validator("quantity")
+    @classmethod
+    def _qty_positive(cls, v):
+        if v <= 0:
+            raise ValueError("quantity must be > 0")
+        return v
+
+
 class WarehouseSplit(BaseModel):
     """One warehouse allocation inside an arrival item."""
     warehouse_id: int
@@ -381,8 +408,16 @@ class ArrivalItemCreate(BaseModel):
     brand_id: int
     rice_type_id: Optional[int] = None
     bag_size: float = 25.0   # 25 or 26
-    weights: List[WeightRow]
-    warehouse_splits: List[WarehouseSplit]
+
+    # NEW: per-row entries with explicit warehouse_id (preferred path).
+    # When present, the backend uses these directly — no proportional math,
+    # no rounding drift, bags and pieces stay in their correct warehouses.
+    entries: Optional[List[ArrivalItemEntry]] = None
+
+    # LEGACY: flat weight rows + separate warehouse splits.
+    # Still accepted for backward compatibility when entries is absent.
+    weights: Optional[List[WeightRow]] = None
+    warehouse_splits: Optional[List[WarehouseSplit]] = None
 
     # Per-item admin-only pricing
     buying_price: Optional[float] = None  # buying price per bag for this item
@@ -398,19 +433,16 @@ class ArrivalItemCreate(BaseModel):
             raise ValueError("bag_size must be 25 or 26")
         return v
 
-    @field_validator("weights")
-    @classmethod
-    def _weights_not_empty(cls, v):
-        if not v:
-            raise ValueError("At least one weight row is required")
-        return v
-
-    @field_validator("warehouse_splits")
-    @classmethod
-    def _splits_not_empty(cls, v):
-        if not v:
-            raise ValueError("At least one warehouse split is required")
-        return v
+    @model_validator(mode="after")
+    def _require_weights_or_entries(self):
+        has_entries = bool(self.entries)
+        has_legacy = bool(self.weights) and bool(self.warehouse_splits)
+        if not has_entries and not has_legacy:
+            raise ValueError(
+                "Provide either 'entries' (new format) or both 'weights' and "
+                "'warehouse_splits' (legacy format)"
+            )
+        return self
 
 
 class ArrivalCreate(BaseModel):
