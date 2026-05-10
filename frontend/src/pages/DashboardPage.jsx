@@ -1315,14 +1315,15 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks }) {
         const avail = availWeights.find(w => w.weight_kg === entry.weight_kg);
         const max = avail?.qty || 0;
         if (qty > max) return toast.error(`Send #${gi + 1} · ${entry.weight_kg}KG: Exceeds available (${max})`);
-        if (isAdmin && (!entry.selling_price || Number(entry.selling_price) <= 0))
-          return toast.error(`Send #${gi + 1} · ${entry.weight_kg}KG: Enter selling price`);
+        // Price is optional — if admin skips it the transaction is saved as
+        // pending so they can fill it in later from the Transactions page.
+        const hasSellPrice = isAdmin && entry.selling_price && Number(entry.selling_price) > 0;
         payloadItems.push({
           brand_id: Number(g.brand_id),
           warehouse_id: Number(g.warehouse_id),
           bag_weight_kg: entry.weight_kg,
           bags: qty,
-          ...(isAdmin && entry.selling_price ? { selling_price: Number(entry.selling_price) } : {}),
+          ...(hasSellPrice ? { selling_price: Number(entry.selling_price) } : {}),
         });
       }
     }
@@ -1343,7 +1344,14 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks }) {
         ...(isAdmin ? { location: header.location || null } : {}),
       };
       await onSubmit(payload);
-      toast.success(isAdmin ? "Send recorded" : "Send recorded — awaiting admin pricing");
+      const allPriced = groups.every(g =>
+        g.weight_entries.every(e => e.selling_price && Number(e.selling_price) > 0)
+      );
+      toast.success(
+        isAdmin && !allPriced
+          ? "Send recorded — awaiting sell price"
+          : "Send recorded"
+      );
       onClose();
     } catch (err) {
       toast.error(getErrorMessage(err, "Failed to record send"));
