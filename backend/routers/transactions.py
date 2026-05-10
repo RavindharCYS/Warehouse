@@ -840,9 +840,39 @@ def create_send(
             total_weight_kg=weight_kg,
             warehouse_id=item.warehouse_id,
         )
+
         # Per-item selling price
         if is_admin and getattr(item, "selling_price", None) is not None:
             ti.selling_price = item.selling_price
+
+        # ============================================================
+        # FIX: Auto inherit latest inbound buying price
+        # ============================================================
+        latest_inbound_item = (
+            db.query(TransactionItem)
+            .join(Transaction)
+            .filter(
+                Transaction.transaction_type == TransactionType.inbound,
+                TransactionItem.brand_id == item.brand_id,
+                TransactionItem.buying_price.isnot(None),
+            )
+        )
+
+        # Match rice type if available
+        if getattr(item, "rice_type_id", None) is not None:
+            latest_inbound_item = latest_inbound_item.filter(
+                TransactionItem.rice_type_id == getattr(item, "rice_type_id", None)
+            )
+
+        latest_inbound_item = (
+            latest_inbound_item
+            .order_by(Transaction.transaction_date.desc())
+            .first()
+        )
+
+        if latest_inbound_item and latest_inbound_item.buying_price is not None:
+            ti.buying_price = latest_inbound_item.buying_price
+
         db.add(ti)
         db.flush()
 
@@ -859,7 +889,7 @@ def create_send(
     txn.total_weight_kg = grand_kg
 
     # Compute profit/loss snapshot
-    if is_admin and txn.sell_price is not None and payload.items:
+    if is_admin and payload.items:
         first = payload.items[0]
         last_in = (
             db.query(Transaction)
