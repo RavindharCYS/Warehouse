@@ -188,7 +188,8 @@ export default function ReportsPage() {
       } else {
         const headers = [
           "Date", "Type", "Vehicle", "Driver", "Driver Number",
-          "Source / Destination", "Commission Partner",
+          "Source / Destination",
+          ...(isAdmin ? ["Commission Partner"] : []),
           "Total Bags", "Total KG",
           ...(isAdmin ? ["Mill Owner", "Price/Bag", "Sell Price/Bag", "Rent", "Hidden Charges", "P/L per Bag"] : []),
           "Notes",
@@ -204,7 +205,7 @@ export default function ReportsPage() {
             tx.driver_name || "",
             tx.driver_number || "",
             (isIn ? tx.source : tx.destination) || "",
-            tx.commission_partner || "",
+            ...(isAdmin ? [tx.commission_partner || ""] : []),
             tx.total_bags ?? 0,
             (tx.total_weight_kg ?? 0).toFixed(1),
             ...(isAdmin ? [
@@ -320,7 +321,27 @@ export default function ReportsPage() {
       if (tx.transaction_type === "inbound") inbound += bags;
       else {
         outbound += bags;
-        if (tx.price != null && tx.sell_price != null) {
+        // Prefer per-item prices (modern transactions); fall back to legacy global price fields
+        const itemsWithBoth = (tx.items || []).filter(
+          it => it.buying_price != null && it.selling_price != null
+        );
+        if (itemsWithBoth.length > 0) {
+          itemsWithBoth.forEach(it => {
+            const itBags = it.total_bags || 0;
+            // Check per-weight prices first
+            const weightsWithBoth = (it.weights || []).filter(
+              w => w.buying_price != null && w.selling_price != null
+            );
+            if (weightsWithBoth.length > 0) {
+              weightsWithBoth.forEach(w => {
+                profit += (Number(w.selling_price) - Number(w.buying_price)) * (w.quantity || 0);
+              });
+            } else {
+              profit += (Number(it.selling_price) - Number(it.buying_price)) * itBags;
+            }
+          });
+          hasPL = true;
+        } else if (tx.price != null && tx.sell_price != null) {
           profit += (Number(tx.sell_price) - Number(tx.price)) * bags;
           hasPL = true;
         }

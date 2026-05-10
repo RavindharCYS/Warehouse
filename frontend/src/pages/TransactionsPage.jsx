@@ -468,11 +468,12 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
                     const filledSell = row.existingSellPrice ?? (val ? parseFloat(val) : null);
                     const diff = filledSell != null && buyP != null ? filledSell - buyP : null;
                     const col = diff == null ? "var(--success)" : diff > 0 ? "var(--success)" : diff < 0 ? "var(--danger)" : "var(--text-muted)";
+                    const bg  = diff == null ? "var(--success-soft)" : diff > 0 ? "var(--success-soft)" : "var(--danger-soft)";
                     return (
                       <div key={row.key} className="rounded-xl px-3 py-2 flex items-center justify-between gap-2"
-                        style={{ backgroundColor: "var(--success-soft)", border: "1px solid rgba(16,185,129,0.3)" }}>
+                        style={{ backgroundColor: bg, border: `1px solid ${diff != null && diff < 0 ? "rgba(239,68,68,0.3)" : "rgba(16,185,129,0.3)"}` }}>
                         <div className="flex items-center gap-2 min-w-0">
-                          <span className="text-[10px] font-bold" style={{ color: "var(--success)" }}>✓</span>
+                          <span className="text-[10px] font-bold" style={{ color: col }}>✓</span>
                           <span className="text-xs font-semibold truncate" style={{ color: "var(--text-primary)" }}>
                             {row.brandLabel}
                             {row.typeLabel && <span className="font-normal opacity-70"> · {row.typeLabel}</span>}
@@ -483,10 +484,10 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
                           </span>
                         </div>
                         <span className="text-xs font-bold shrink-0" style={{ color: col }}>
-                          ₹{filledSell ?? "—"}
-                          {diff != null && (
-                            <span className="ml-1 text-[10px]">({diff > 0 ? "+" : ""}{diff.toFixed(2)})</span>
-                          )}
+                          {buyP != null && diff != null
+                            ? <>₹{buyP} {diff > 0 ? "+" : "−"} ₹{Math.abs(diff).toFixed(0)}</>
+                            : <>₹{filledSell ?? "—"}</>
+                          }
                         </span>
                       </div>
                     );
@@ -525,9 +526,9 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
                           onChange={e => setWeightSellingPrices(p => ({ ...p, [row.key]: e.target.value }))}
                           placeholder={`₹ per ${row.unitLabel}${row.existingSellPrice ? ` (was ₹${row.existingSellPrice})` : ""}`} />
                         {diff != null && (
-                          <span className="text-[10px] font-bold px-2 py-0.5 rounded"
+                          <span className="text-[11px] font-bold px-2 py-1 rounded-lg"
                             style={{ color: col, backgroundColor: bg }}>
-                            {diff > 0 ? "+" : ""}{diff.toFixed(2)}/{row.unitLabel}
+                            ₹{buyP} {diff > 0 ? "+" : "−"} ₹{Math.abs(diff).toFixed(0)}
                           </span>
                         )}
                       </div>
@@ -535,8 +536,8 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
                         <p className="text-[10px] font-semibold" style={{ color: "var(--text-muted)" }}>
                           Revenue: ₹{total}
                           {diff != null && (
-                            <span className="ml-2" style={{ color: col }}>
-                              P&L: ₹{(diff * row.quantity).toFixed(2)}
+                            <span className="ml-2 font-bold" style={{ color: col }}>
+                              P&L: {diff > 0 ? "+" : ""}₹{(diff * row.quantity).toFixed(2)}
                             </span>
                           )}
                         </p>
@@ -600,7 +601,28 @@ function TransactionAccordion({ tx, isOpen, onToggle, isAdmin,
   const totalBags = tx.total_bags ?? tx.quantity_bags ?? 0;
   const totalKg   = tx.total_weight_kg ?? tx.quantity_kg ?? 0;
   const txItems   = tx.items || [];
-  const sellDiff  = tx.sell_price != null && tx.price != null ? tx.sell_price - tx.price : null;
+  // Compute aggregate profit/loss: prefer per-item/per-weight prices, fall back to legacy global fields
+  const sellDiff = (() => {
+    const itemsWithBoth = txItems.filter(it => it.buying_price != null && it.selling_price != null);
+    if (itemsWithBoth.length > 0) {
+      let totalPL = 0, totalBagsForPL = 0;
+      itemsWithBoth.forEach(it => {
+        const weightsWithBoth = (it.weights || []).filter(w => w.buying_price != null && w.selling_price != null);
+        if (weightsWithBoth.length > 0) {
+          weightsWithBoth.forEach(w => {
+            totalPL += (Number(w.selling_price) - Number(w.buying_price)) * (w.quantity || 0);
+            totalBagsForPL += w.quantity || 0;
+          });
+        } else {
+          totalPL += (Number(it.selling_price) - Number(it.buying_price)) * (it.total_bags || 0);
+          totalBagsForPL += it.total_bags || 0;
+        }
+      });
+      return totalBagsForPL > 0 ? totalPL / totalBagsForPL : null;
+    }
+    if (tx.sell_price != null && tx.price != null) return tx.sell_price - tx.price;
+    return null;
+  })();
 
   const brandName = (id) => {
     if (id) { const b = brands.find(x => x.id == id); if (b) return i18n.language === "ta" && b.name_ta ? b.name_ta : b.name; }

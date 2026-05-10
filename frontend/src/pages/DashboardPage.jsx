@@ -86,16 +86,26 @@ function DriverNumberInput({ value, onChange, placeholder }) {
    PROFIT / LOSS BADGE
    ────────────────────────────────────────────────────────── */
 function ProfitLossBadge({ buyPrice, sellPrice, items, totalBags, size = "sm" }) {
-  // Prefer per-item calculation if items have both buy + sell prices
+  // Prefer per-item / per-weight calculation if available
   let diff = null;
   const txItems = items || [];
   const itemsWithBoth = txItems.filter(it => it.buying_price != null && it.selling_price != null);
   if (itemsWithBoth.length > 0) {
-    const totalPL = itemsWithBoth.reduce(
-      (sum, it) => sum + (Number(it.selling_price) - Number(it.buying_price)) * (it.total_bags || 0), 0
-    );
-    const bags = totalBags || itemsWithBoth.reduce((s, it) => s + (it.total_bags || 0), 0);
-    diff = bags > 0 ? totalPL / bags : 0;
+    let totalPL = 0, totalBagsForPL = 0;
+    itemsWithBoth.forEach(it => {
+      const weightsWithBoth = (it.weights || []).filter(w => w.buying_price != null && w.selling_price != null);
+      if (weightsWithBoth.length > 0) {
+        weightsWithBoth.forEach(w => {
+          totalPL += (Number(w.selling_price) - Number(w.buying_price)) * (w.quantity || 0);
+          totalBagsForPL += w.quantity || 0;
+        });
+      } else {
+        totalPL += (Number(it.selling_price) - Number(it.buying_price)) * (it.total_bags || 0);
+        totalBagsForPL += it.total_bags || 0;
+      }
+    });
+    const bags = totalBagsForPL || totalBags || 1;
+    diff = totalPL / bags;
   } else if (buyPrice != null && sellPrice != null && buyPrice !== "" && sellPrice !== "") {
     diff = Number(sellPrice) - Number(buyPrice);
   }
@@ -1545,7 +1555,7 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks }) {
                               {isAdmin && diff != null && (
                                 <span className="text-[10px] font-bold px-1.5 py-0.5 rounded"
                                   style={{ color: col, backgroundColor: diff > 0 ? "var(--success-soft)" : "var(--danger-soft)" }}>
-                                  {diff > 0 ? "+" : ""}{diff.toFixed(2)}/{unitLabel} · P&L ₹{(diff * qty).toFixed(0)}
+                                  ₹{bp} {diff > 0 ? "+" : "−"} ₹{Math.abs(diff).toFixed(0)} · P&L ₹{(diff * qty).toFixed(0)}
                                 </span>
                               )}
                             </div>
