@@ -631,14 +631,25 @@ def create_arrival(
             parent = all_items_by_id.get(w.item_id)
             return parent is not None and parent.buying_price is not None
 
-        # Only mark complete when there is at least one weight row AND all are priced
-        if all_weight_rows and all(_weight_row_is_priced(w) for w in all_weight_rows):
+        # Only mark complete when:
+        #   1. All weight rows have a buying price, AND
+        #   2. mill_owner_name is filled, AND
+        #   3. rent is filled (not None), AND
+        #   4. hidden_charges is filled (not None)
+        # Any missing field keeps the transaction pending.
+        all_prices_filled = bool(all_weight_rows) and all(_weight_row_is_priced(w) for w in all_weight_rows)
+        all_admin_fields_filled = (
+            bool(txn.mill_owner_name and txn.mill_owner_name.strip()) and
+            txn.rent is not None and
+            txn.hidden_charges is not None
+        )
+
+        if all_prices_filled and all_admin_fields_filled:
             txn.admin_pending = False
             txn.approval_status = ApprovalStatus.completed
             txn.completed_by = current_user.id
             txn.completed_at = datetime.utcnow()
         else:
-            # Explicitly keep pending (was already set above, but be explicit)
             txn.admin_pending = True
             txn.approval_status = ApprovalStatus.pending
 
@@ -961,7 +972,13 @@ def complete_admin_fields(
             return parent is not None and parent.buying_price is not None
 
         all_priced = all(_weight_is_priced(w) for w in all_w) if all_w else False
-        tx.admin_pending = not all_priced
+        # Also require mill_owner_name, rent, hidden_charges to be filled before marking complete
+        all_admin_fields_filled = (
+            bool(tx.mill_owner_name and tx.mill_owner_name.strip()) and
+            tx.rent is not None and
+            tx.hidden_charges is not None
+        )
+        tx.admin_pending = not (all_priced and all_admin_fields_filled)
         tx.approval_status = ApprovalStatus.pending if tx.admin_pending else ApprovalStatus.completed
     else:
         all_items_check = db.query(TransactionItem).filter(

@@ -187,11 +187,23 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
         data.item_weight_prices = weightPrices;
       }
 
-      // Count truly unfilled rows to decide if save is valid
-      const stillUnfilled = allWeightRows.filter(r => !r.isBuyFilled);
+      // Validate: required fields must be filled before saving
+      // mill_owner_name, rent, hidden_charges are required for completion
+      const stillUnfilledWeights = allWeightRows.filter(r => !r.isBuyFilled);
       const newPricesEntered = Object.keys(itemBuyingPrices).length > 0;
-      if (!data.mill_owner_name && !newPricesEntered && !data.rent && stillUnfilled.length > 0) {
-        toast.error("Enter at least Mill Owner or one buying price to save");
+
+      // At least something must be newly entered
+      const nothingNewEntered = (
+        !data.mill_owner_name &&
+        !newPricesEntered &&
+        data.rent === undefined &&
+        data.hidden_charges === undefined &&
+        !data.commission_partner
+      );
+      if (nothingNewEntered && stillUnfilledWeights.length === 0) {
+        // Everything already filled — allow save (will mark complete)
+      } else if (nothingNewEntered) {
+        toast.error("Fill in at least one required field to save");
         return;
       }
     } else {
@@ -260,6 +272,23 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
 
       {isArrival ? (
         <>
+          {/* Required fields banner — shows which required fields are still missing */}
+          {(() => {
+            const missing = [];
+            if (!millOwnerAlreadyFilled && !millOwnerName.trim()) missing.push("Mill Owner");
+            if (!rentAlreadyFilled && rent === "") missing.push("Rent");
+            if (!hiddenChargesAlreadyFilled && hiddenCharges === "") missing.push("Hidden Charges");
+            const unfilledPrices = allWeightRows.filter(r => !r.isBuyFilled);
+            if (unfilledPrices.length > 0) missing.push(`Buying price (${unfilledPrices.length} weight${unfilledPrices.length > 1 ? "s" : ""})`);
+            if (missing.length === 0) return null;
+            return (
+              <div className="px-3 py-2.5 rounded-xl text-xs font-semibold"
+                style={{ backgroundColor: "rgba(239,68,68,0.07)", border: "1.5px solid rgba(239,68,68,0.25)", color: "var(--danger)" }}>
+                <span className="font-bold">Still required: </span>{missing.join(" · ")}
+              </div>
+            );
+          })()}
+
           {/* Mill Owner + Commission Partner — only show if not already filled */}
           {!millOwnerAlreadyFilled && (
             <div>
