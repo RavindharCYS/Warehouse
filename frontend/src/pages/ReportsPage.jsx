@@ -5,7 +5,7 @@ import {
   BarChart3, Package, TrendingUp, TrendingDown,
   ArrowLeftRight, Filter, FileText, FileSpreadsheet,
   Calendar, X, RefreshCw, IndianRupee, User, Truck,
-  ChevronDown, ChevronUp,
+  ChevronDown, ChevronUp, Download, Upload, Trash2, AlertTriangle,
 } from "lucide-react";
 import {
   format, subDays, startOfMonth, endOfMonth,
@@ -14,7 +14,7 @@ import {
 import toast from "react-hot-toast";
 import {
   reportsApi, transactionApi, stockApi, brandApi,
-  warehouseApi, millOwnerApi, getErrorMessage,
+  warehouseApi, millOwnerApi, adminApi, getErrorMessage,
   exportTransactionsCsv,
 } from "../utils/api";
 import { useAuth } from "../hooks/useAuth";
@@ -119,6 +119,15 @@ export default function ReportsPage() {
   const [exporting, setExporting] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
   const [showDateRange, setShowDateRange] = useState(false);
+
+  // Admin data management state
+  const [backingUp, setBackingUp]     = useState(false);
+  const [restoring, setRestoring]     = useState(false);
+  const [deletingAll, setDeletingAll] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
+  const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
+  const [pendingRestoreData, setPendingRestoreData] = useState(null);
 
   // Filters
   const [dateFrom, setDateFrom] = useState(fmtDate(subDays(new Date(), 13)));
@@ -271,6 +280,87 @@ export default function ReportsPage() {
   const clearFilters = () => {
     setFilterBrand(""); setFilterWarehouse(""); setFilterType("");
     setFilterMillOwner(""); setFilterVehicle("");
+  };
+
+  /* ── Backup ── */
+  const handleBackup = async () => {
+    setBackingUp(true);
+    try {
+      const res = await adminApi.backup();
+      const json = JSON.stringify(res.data, null, 2);
+      const blob = new Blob([json], { type: "application/json" });
+      const url  = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const date = new Date().toISOString().slice(0, 10);
+      link.href     = url;
+      link.download = `rice_warehouse_backup_${date}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      toast.success("Backup downloaded successfully");
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Backup failed"));
+    } finally {
+      setBackingUp(false);
+    }
+  };
+
+  /* ── Restore — file picker → confirm → upload ── */
+  const handleRestoreFilePick = () => {
+    const input = document.createElement("input");
+    input.type   = "file";
+    input.accept = ".json,application/json";
+    input.onchange = async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        if (data.version !== 1 || !data.data) {
+          toast.error("Invalid backup file format");
+          return;
+        }
+        setPendingRestoreData(data);
+        setShowRestoreConfirm(true);
+      } catch {
+        toast.error("Could not read backup file — make sure it is a valid JSON backup");
+      }
+    };
+    input.click();
+  };
+
+  const handleRestoreConfirm = async () => {
+    if (!pendingRestoreData) return;
+    setRestoring(true);
+    setShowRestoreConfirm(false);
+    try {
+      await adminApi.restore(pendingRestoreData);
+      toast.success("Backup restored! Reloading…");
+      setTimeout(() => window.location.reload(), 1200);
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Restore failed"));
+    } finally {
+      setRestoring(false);
+      setPendingRestoreData(null);
+    }
+  };
+
+  /* ── Delete all ── */
+  const handleDeleteAll = async () => {
+    if (deleteConfirmText !== "DELETE ALL") return;
+    setDeletingAll(true);
+    setShowDeleteConfirm(false);
+    setDeleteConfirmText("");
+    try {
+      await adminApi.deleteAll();
+      toast.success("All data deleted. Reloading…");
+      setTimeout(() => window.location.reload(), 1200);
+    } catch (err) {
+      toast.error(getErrorMessage(err, "Delete failed"));
+    } finally {
+      setDeletingAll(false);
+    }
   };
 
   const activeFilterCount = [filterBrand, filterWarehouse, filterType, filterMillOwner, filterVehicle].filter(Boolean).length;
@@ -516,7 +606,175 @@ export default function ReportsPage() {
           <FileSpreadsheet size={12} />
           XLSX
         </button>
+
+        {/* Admin-only: Backup / Import / Delete */}
+        {isAdmin && (
+          <>
+            <div style={{ width: 1, height: 20, backgroundColor: "var(--border)", margin: "0 2px", alignSelf: "center" }} />
+
+            {/* Backup */}
+            <button
+              onClick={handleBackup}
+              disabled={backingUp}
+              className="flex items-center gap-1 shrink-0"
+              style={{
+                padding: "7px 10px", borderRadius: 10,
+                backgroundColor: "rgba(16,185,129,0.08)",
+                color: "var(--success)",
+                border: "1.5px solid rgba(16,185,129,0.3)",
+                fontSize: 11, fontWeight: 700,
+                cursor: backingUp ? "not-allowed" : "pointer",
+                opacity: backingUp ? 0.6 : 1,
+              }}
+              title="Download full backup as JSON"
+            >
+              <Download size={12} />
+              {backingUp ? "…" : "Backup"}
+            </button>
+
+            {/* Import / Restore */}
+            <button
+              onClick={handleRestoreFilePick}
+              disabled={restoring}
+              className="flex items-center gap-1 shrink-0"
+              style={{
+                padding: "7px 10px", borderRadius: 10,
+                backgroundColor: "rgba(99,102,241,0.08)",
+                color: "var(--accent)",
+                border: "1.5px solid rgba(99,102,241,0.3)",
+                fontSize: 11, fontWeight: 700,
+                cursor: restoring ? "not-allowed" : "pointer",
+                opacity: restoring ? 0.6 : 1,
+              }}
+              title="Restore data from a backup JSON file"
+            >
+              <Upload size={12} />
+              {restoring ? "Restoring…" : "Import"}
+            </button>
+
+            {/* Delete All */}
+            <button
+              onClick={() => { setShowDeleteConfirm(true); setDeleteConfirmText(""); }}
+              disabled={deletingAll}
+              className="flex items-center gap-1 shrink-0"
+              style={{
+                padding: "7px 10px", borderRadius: 10,
+                backgroundColor: "rgba(239,68,68,0.08)",
+                color: "var(--danger)",
+                border: "1.5px solid rgba(239,68,68,0.3)",
+                fontSize: 11, fontWeight: 700,
+                cursor: deletingAll ? "not-allowed" : "pointer",
+                opacity: deletingAll ? 0.6 : 1,
+              }}
+              title="Delete ALL data (irreversible)"
+            >
+              <Trash2 size={12} />
+              {deletingAll ? "Deleting…" : "Delete All"}
+            </button>
+          </>
+        )}
       </div>
+
+      {/* ── Restore confirm modal ── */}
+      {showRestoreConfirm && pendingRestoreData && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ backgroundColor: "rgba(0,0,0,0.55)", backdropFilter: "blur(4px)" }}>
+          <div className="rounded-2xl p-6 max-w-sm w-full space-y-4"
+            style={{ backgroundColor: "var(--bg-card)", border: "1.5px solid var(--border)", boxShadow: "var(--shadow-xl)" }}>
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl flex items-center justify-center"
+                style={{ backgroundColor: "rgba(99,102,241,0.1)" }}>
+                <Upload size={18} style={{ color: "var(--accent)" }} />
+              </div>
+              <div>
+                <p className="text-sm font-bold" style={{ color: "var(--text-primary)" }}>Restore Backup?</p>
+                <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+                  Created {pendingRestoreData.created_at?.slice(0, 10)} by {pendingRestoreData.created_by}
+                </p>
+              </div>
+            </div>
+            <div className="rounded-xl p-3 text-xs space-y-1"
+              style={{ backgroundColor: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.3)" }}>
+              <p className="font-bold flex items-center gap-1.5" style={{ color: "#f59e0b" }}>
+                <AlertTriangle size={12} /> This will overwrite ALL current data
+              </p>
+              <p style={{ color: "var(--text-secondary)" }}>
+                All existing transactions, stocks, brands, and users will be replaced with the backup data.
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <button className="btn-secondary flex-1" onClick={() => { setShowRestoreConfirm(false); setPendingRestoreData(null); }}>
+                Cancel
+              </button>
+              <button className="btn-primary flex-1" onClick={handleRestoreConfirm}
+                style={{ backgroundColor: "var(--accent)", border: "none" }}>
+                Restore
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Delete All confirm modal ── */}
+      {showDeleteConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ backgroundColor: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}>
+          <div className="rounded-2xl p-6 max-w-sm w-full space-y-4"
+            style={{ backgroundColor: "var(--bg-card)", border: "1.5px solid rgba(239,68,68,0.4)", boxShadow: "var(--shadow-xl)" }}>
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl flex items-center justify-center"
+                style={{ backgroundColor: "rgba(239,68,68,0.1)" }}>
+                <Trash2 size={18} style={{ color: "var(--danger)" }} />
+              </div>
+              <div>
+                <p className="text-sm font-bold" style={{ color: "var(--danger)" }}>Delete All Data</p>
+                <p className="text-xs" style={{ color: "var(--text-muted)" }}>This cannot be undone</p>
+              </div>
+            </div>
+            <div className="rounded-xl p-3 text-xs space-y-1.5"
+              style={{ backgroundColor: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.2)" }}>
+              <p className="font-bold" style={{ color: "var(--danger)" }}>What will be deleted:</p>
+              <p style={{ color: "var(--text-secondary)" }}>
+                All transactions, stocks, brands, rice types, mill owners, and quality grades.
+              </p>
+              <p className="font-semibold" style={{ color: "var(--text-primary)" }}>
+                ✓ Users and warehouses will be kept.
+              </p>
+            </div>
+            <div>
+              <p className="text-xs font-semibold mb-1.5" style={{ color: "var(--text-secondary)" }}>
+                Type <span className="font-bold" style={{ color: "var(--danger)" }}>DELETE ALL</span> to confirm:
+              </p>
+              <input
+                className="input-field"
+                value={deleteConfirmText}
+                onChange={e => setDeleteConfirmText(e.target.value)}
+                placeholder="DELETE ALL"
+                style={{ borderColor: deleteConfirmText === "DELETE ALL" ? "var(--danger)" : undefined }}
+                autoFocus
+              />
+            </div>
+            <div className="flex gap-2">
+              <button className="btn-secondary flex-1" onClick={() => { setShowDeleteConfirm(false); setDeleteConfirmText(""); }}>
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteAll}
+                disabled={deleteConfirmText !== "DELETE ALL"}
+                className="flex-1 py-2.5 rounded-xl text-sm font-bold transition-all"
+                style={{
+                  backgroundColor: deleteConfirmText === "DELETE ALL" ? "var(--danger)" : "rgba(239,68,68,0.2)",
+                  color: deleteConfirmText === "DELETE ALL" ? "#fff" : "var(--danger)",
+                  border: "none",
+                  cursor: deleteConfirmText !== "DELETE ALL" ? "not-allowed" : "pointer",
+                }}
+              >
+                Delete All Data
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ══════════════════════════════════════════════════════
          DATE RANGE PANEL — only when expanded

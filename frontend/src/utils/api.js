@@ -606,4 +606,11 @@ export const millOwnerApi = {
   delete: (id)       => api.delete(`/mill-owners/${id}`),
 };
 
+// -- Admin data management (admin only) --------------------------------
+export const adminApi = {
+  backup:    ()       => api.get("/admin/backup"),
+  restore:   (data)   => api.post("/admin/restore", data),
+  deleteAll: ()       => api.delete("/admin/delete-all"),
+};
+
 export default api;

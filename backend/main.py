@@ -9,7 +9,7 @@ import uvicorn
 from database import engine, Base, SessionLocal
 from routers import (
     auth, users, warehouses, stocks, transactions,
-    dashboard, brands, rice_types, mill_owners,
+    dashboard, brands, rice_types, mill_owners, admin,
 )
 
 
@@ -304,6 +304,7 @@ app.include_router(dashboard.router,    prefix="/api/dashboard",    tags=["Dashb
 app.include_router(brands.router,       prefix="/api/brands",       tags=["Brands"])
 app.include_router(rice_types.router,   prefix="/api/rice-types",   tags=["Rice Types"])
 app.include_router(mill_owners.router,  prefix="/api/mill-owners",  tags=["Mill Owners"])
+app.include_router(admin.router,        prefix="/api/admin",        tags=["Admin"])
 
 
 # ============================================================
