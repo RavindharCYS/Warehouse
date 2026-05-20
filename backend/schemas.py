@@ -373,7 +373,8 @@ class ArrivalItemEntry(BaseModel):
     weight: float
     quantity: int
     warehouse_id: int
-    buying_price: Optional[float] = None  # admin only
+    buying_price: Optional[float] = None   # admin only
+    margin_price: Optional[float] = None   # admin only — internal cost basis for P&L
 
     @field_validator("weight")
     @classmethod
@@ -421,6 +422,7 @@ class ArrivalItemCreate(BaseModel):
 
     # Per-item admin-only pricing
     buying_price: Optional[float] = None  # buying price per bag for this item
+    margin_price: Optional[float] = None  # admin only — internal cost basis for P&L
 
     # Optional client-computed totals (server recomputes & validates)
     total_bags: Optional[int] = None
@@ -488,6 +490,9 @@ class SendItemCreate(BaseModel):
 
     # Per-item selling price (mandatory for send)
     selling_price: Optional[float] = None
+    # Admin-controlled margin price for profit/loss calculation
+    # profit = selling_price - margin_price (falls back to buying_price)
+    margin_price: Optional[float] = None
 
     @field_validator("bags")
     @classmethod
@@ -580,6 +585,7 @@ class TransactionItemOut(BaseModel):
     # Per-item pricing
     buying_price: Optional[float] = None
     selling_price: Optional[float] = None
+    margin_price: Optional[float] = None
 
     brand: Optional[BrandOut] = None
     rice_type_ref: Optional[RiceTypeOut] = None
@@ -627,6 +633,7 @@ class TransactionOut(BaseModel):
     hidden_charges: Optional[float] = None
     location: Optional[str] = None
     sell_price: Optional[float] = None
+    margin_price: Optional[float] = None
     profit_loss: Optional[float] = None
 
     # Workflow
@@ -701,6 +708,7 @@ class TransactionCreate(BaseModel):
 class ProfitLossOut(BaseModel):
     transaction_id: int
     buy_price: Optional[float] = None
+    margin_price: Optional[float] = None
     sell_price: Optional[float] = None
     diff_per_bag: Optional[float] = None
     total_bags: int = 0

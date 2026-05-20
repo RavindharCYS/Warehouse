@@ -200,7 +200,7 @@ export default function ReportsPage() {
           "Source / Destination",
           ...(isAdmin ? ["Commission Partner"] : []),
           "Total Bags", "Total KG",
-          ...(isAdmin ? ["Mill Owner", "Price/Bag", "Sell Price/Bag", "Rent", "Hidden Charges", "P/L per Bag"] : []),
+          ...(isAdmin ? ["Mill Owner", "Price/Bag", "Margin/Bag", "Sell Price/Bag", "Rent", "Hidden Charges", "P/L per Bag"] : []),
           "Notes",
         ];
         const rows = transactions.map((tx) => {
@@ -219,6 +219,7 @@ export default function ReportsPage() {
             ...(isAdmin ? [
               tx.mill_owner_name || "",
               tx.price != null ? tx.price : "",
+              tx.margin_price != null ? tx.margin_price : "",
               tx.sell_price != null ? tx.sell_price : "",
               tx.rent != null ? tx.rent : "",
               tx.hidden_charges != null ? tx.hidden_charges : "",
@@ -411,9 +412,28 @@ export default function ReportsPage() {
         inbound += bags;
       } else {
         outbound += bags;
-        if (tx.profit_loss != null) {
-          profit += Number(tx.profit_loss);
+        // Compute total P/L using full margin_price fallback chain
+        const items = tx.items || [];
+        const itemsWithBoth = items.filter(it => (it.margin_price != null || it.buying_price != null) && it.selling_price != null);
+        if (itemsWithBoth.length > 0) {
+          let totalPL = 0;
+          itemsWithBoth.forEach(it => {
+            const cost = it.margin_price ?? tx.margin_price ?? it.buying_price ?? tx.price ?? 0;
+            // Accumulate TOTAL P/L (not per-bag) so the summary card shows net ₹ correctly
+            totalPL += (Number(it.selling_price) - cost) * (it.total_bags || 0);
+          });
+          profit += totalPL;
           hasPL = true;
+        } else if (tx.profit_loss != null) {
+          // Backend stores profit_loss as per-bag; multiply back to get total
+          profit += Number(tx.profit_loss) * bags;
+          hasPL = true;
+        } else {
+          const cost = tx.margin_price ?? tx.price;
+          if (cost != null && tx.sell_price != null) {
+            profit += (tx.sell_price - cost) * bags;
+            hasPL = true;
+          }
         }
       }
     });
@@ -1256,7 +1276,23 @@ export default function ReportsPage() {
             <div className="md:hidden space-y-1.5">
               {transactions.slice(0, 50).map((tx) => {
                 const isInbound = tx.transaction_type === "inbound";
-                const diff = tx.profit_loss ?? null;
+                // Recompute P/L with full margin_price fallback chain
+                const _items = tx.items || [];
+                const _itemsWithBoth = _items.filter(it => (it.margin_price != null || it.buying_price != null) && it.selling_price != null);
+                let diff = null;
+                if (_itemsWithBoth.length > 0) {
+                  let _totalPL = 0, _totalBags = 0;
+                  _itemsWithBoth.forEach(it => {
+                    const cost = it.margin_price ?? tx.margin_price ?? it.buying_price ?? tx.price ?? 0;
+                    _totalPL += (Number(it.selling_price) - cost) * (it.total_bags || 0);
+                    _totalBags += it.total_bags || 0;
+                  });
+                  diff = _totalBags ? _totalPL / _totalBags : null;
+                } else {
+                  const cost = tx.margin_price ?? tx.price;
+                  if (cost != null && tx.sell_price != null) diff = tx.sell_price - cost;
+                  else if (tx.profit_loss != null) diff = Number(tx.profit_loss);
+                }
                 return (
                   <div
                     key={tx.id}
@@ -1358,6 +1394,7 @@ export default function ReportsPage() {
                     <th className="text-right">Bags</th>
                     <th className="text-right">KG</th>
                     {isAdmin && <th className="text-right">Buy</th>}
+                    {isAdmin && <th className="text-right">Margin</th>}
                     {isAdmin && <th className="text-right">Sell</th>}
                     {isAdmin && <th className="text-right">P/L</th>}
                   </tr>
@@ -1391,27 +1428,46 @@ export default function ReportsPage() {
                           </td>
                         )}
                         {isAdmin && (
+                          <td className="text-right tabular-nums text-xs" style={{ color: tx.margin_price != null ? "#f59e0b" : undefined }}>
+                            {tx.margin_price != null ? `₹${tx.margin_price}` : "—"}
+                          </td>
+                        )}
+                        {isAdmin && (
                           <td className="text-right tabular-nums text-xs">
                             {tx.sell_price != null ? `₹${tx.sell_price}` : "—"}
                           </td>
                         )}
-                        {isAdmin && (
-                          <td className="text-right">
-                            {diff != null ? (
-                              <span
-                                className="font-bold tabular-nums"
-                                style={{
-                                  color: diff > 0 ? "var(--success)"
-                                    : diff < 0 ? "var(--danger)" : "var(--text-primary)",
-                                }}
-                              >
-                                {diff > 0 ? "+" : ""}{Number(diff).toFixed(2)}
-                              </span>
-                            ) : (
-                              <span style={{ color: "var(--text-muted)" }}>—</span>
-                            )}
-                          </td>
-                        )}
+                        {isAdmin && (() => {
+                          // Compute P/L using margin_price fallback chain
+                          const items = tx.items || [];
+                          const itemsWithBoth = items.filter(it => (it.margin_price != null || it.buying_price != null) && it.selling_price != null);
+                          let effectiveDiff = null;
+                          if (itemsWithBoth.length > 0) {
+                            let totalPL = 0, totalBags = 0;
+                            itemsWithBoth.forEach(it => {
+                              const cost = it.margin_price ?? tx.margin_price ?? it.buying_price ?? tx.price ?? 0;
+                              totalPL += (Number(it.selling_price) - cost) * (it.total_bags || 0);
+                              totalBags += it.total_bags || 0;
+                            });
+                            effectiveDiff = totalBags ? totalPL / totalBags : null;
+                          } else {
+                            const cost = tx.margin_price ?? tx.price;
+                            if (cost != null && tx.sell_price != null) effectiveDiff = tx.sell_price - cost;
+                            else if (diff != null) effectiveDiff = diff;
+                          }
+                          return (
+                            <td className="text-right">
+                              {effectiveDiff != null ? (
+                                <span className="font-bold tabular-nums"
+                                  style={{ color: effectiveDiff > 0 ? "var(--success)" : effectiveDiff < 0 ? "var(--danger)" : "var(--text-primary)" }}>
+                                  {effectiveDiff > 0 ? "+" : ""}{Number(effectiveDiff).toFixed(2)}
+                                </span>
+                              ) : (
+                                <span style={{ color: "var(--text-muted)" }}>—</span>
+                              )}
+                            </td>
+                          );
+                        })()}
                       </tr>
                     );
                   })}

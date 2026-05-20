@@ -551,6 +551,28 @@ def create_arrival(
                         unique = set(row_prices)
                         if len(unique) == 1:
                             ti.buying_price = row_prices[0]
+
+                # margin_price: item-level wins; fall back to aggregated row-level
+                if item.margin_price is not None:
+                    ti.margin_price = item.margin_price
+                else:
+                    row_margins = [
+                        e.margin_price
+                        for e in item.entries
+                        if e.margin_price is not None
+                    ]
+                    if row_margins:
+                        unique_m = set(row_margins)
+                        if len(unique_m) == 1:
+                            ti.margin_price = row_margins[0]
+                        else:
+                            # weighted average when rows differ
+                            total_qty = sum(int(e.quantity) for e in item.entries if e.margin_price is not None)
+                            if total_qty:
+                                ti.margin_price = round(
+                                    sum(e.margin_price * int(e.quantity) for e in item.entries if e.margin_price is not None)
+                                    / total_qty, 4
+                                )
             
             db.add(ti)
             db.flush()
@@ -659,6 +681,10 @@ def create_arrival(
                         unique = set(row_prices)
                         if len(unique) == 1:
                             ti.buying_price = row_prices[0]
+
+                # margin_price: item-level wins
+                if item.margin_price is not None:
+                    ti.margin_price = item.margin_price
                             
             db.add(ti)
             db.flush()
@@ -869,6 +895,10 @@ def create_send(
         if is_admin and getattr(item, "selling_price", None) is not None:
             ti.selling_price = item.selling_price
 
+        # Per-item margin price (admin-controlled internal cost for P&L)
+        if is_admin and getattr(item, "margin_price", None) is not None:
+            ti.margin_price = item.margin_price
+
         # ============================================================
         # FIX: Auto inherit latest inbound buying price
         # ============================================================
@@ -942,11 +972,20 @@ def create_send(
             total_qty  = sum(it.total_bags or 0 for it in all_items)
             txn.sell_price = round(total_val / total_qty, 4) if total_qty else None
 
-            # Compute P&L per-item
-            total_buy_val  = sum((it.buying_price or txn.price or 0) * (it.total_bags or 0) for it in all_items)
+            # Compute transaction-level margin_price as weighted average of item margin prices
+            # Falls back to buying_price if margin_price not set
+            margin_items = [(it.margin_price or it.buying_price or txn.price or 0, it.total_bags or 0) for it in all_items]
+            total_margin_val = sum(p * q for p, q in margin_items)
+            txn.margin_price = round(total_margin_val / total_qty, 4) if total_qty else None
+
+            # Compute P&L using margin_price fallback chain: item.margin_price → txn.margin_price → item.buying_price → txn.price
+            total_effective_cost = sum(
+                (it.margin_price or txn.margin_price or it.buying_price or txn.price or 0) * (it.total_bags or 0)
+                for it in all_items
+            )
             total_sell_val = sum((it.selling_price or 0) * (it.total_bags or 0) for it in all_items)
             if grand_bags:
-                txn.profit_loss = round((total_sell_val - total_buy_val) / grand_bags, 4)
+                txn.profit_loss = round((total_sell_val - total_effective_cost) / grand_bags, 4)
 
             txn.admin_pending = False
             txn.approval_status = ApprovalStatus.completed
@@ -1034,6 +1073,20 @@ def complete_admin_fields(
     else:  # outbound
         if "location" in payload:        tx.location = payload["location"]
 
+        # Per-item margin prices: { item_id: price }
+        if "item_margin_prices" in payload and isinstance(payload["item_margin_prices"], dict):
+            for item_id_str, margin_price in payload["item_margin_prices"].items():
+                try:
+                    item_id = int(item_id_str)
+                    ti = db.query(TransactionItem).filter(
+                        TransactionItem.id == item_id,
+                        TransactionItem.transaction_id == tx.id
+                    ).first()
+                    if ti and margin_price is not None:
+                        ti.margin_price = float(margin_price)
+                except (ValueError, TypeError):
+                    pass
+
         # Per-item selling prices: { item_id: price }
         if "item_selling_prices" in payload and isinstance(payload["item_selling_prices"], dict):
             for item_id_str, selling_price in payload["item_selling_prices"].items():
@@ -1066,8 +1119,6 @@ def complete_admin_fields(
                 except (ValueError, TypeError):
                     pass
 
-        db.flush()
-
         # Set global sell_price = weighted avg of all item selling prices
         all_items = db.query(TransactionItem).filter(
             TransactionItem.transaction_id == tx.id
@@ -1078,25 +1129,32 @@ def complete_admin_fields(
             total_qty = sum(q for _, q in priced_sell)
             tx.sell_price = round(total_val / total_qty, 4) if total_qty else None
 
-        # Compute P&L: per-item (buy price × qty vs sell price × qty)
+        # Compute transaction-level margin_price as weighted average of item margin/buying prices
         all_items_fresh = db.query(TransactionItem).filter(
             TransactionItem.transaction_id == tx.id
         ).all()
-        total_buy = 0.0
+        if all_items_fresh and tx.total_bags:
+            margin_items = [(it.margin_price or it.buying_price or tx.price or 0, it.total_bags or 0) for it in all_items_fresh]
+            total_margin_val = sum(p * q for p, q in margin_items)
+            total_qty_m = sum(q for _, q in margin_items)
+            tx.margin_price = round(total_margin_val / total_qty_m, 4) if total_qty_m else None
+
+        # Compute P&L using margin_price fallback chain: item.margin_price → tx.margin_price → item.buying_price → tx.price
+        total_effective_cost = 0.0
         total_sell = 0.0
         has_both = False
         for it in all_items_fresh:
-            bp = it.buying_price
+            effective_cost = it.margin_price or tx.margin_price or it.buying_price or tx.price or None
             sp = it.selling_price
             qty = it.total_bags or 0
-            if bp is not None and sp is not None and qty > 0:
-                total_buy  += bp * qty
+            if effective_cost is not None and sp is not None and qty > 0:
+                total_effective_cost += effective_cost * qty
                 total_sell += sp * qty
                 has_both = True
         if has_both and tx.total_bags:
-            tx.profit_loss = round((total_sell - total_buy) / tx.total_bags, 4)
+            tx.profit_loss = round((total_sell - total_effective_cost) / tx.total_bags, 4)
         elif tx.sell_price is not None and tx.price is not None:
-            tx.profit_loss = _compute_profit_loss(tx.price, tx.sell_price, tx.total_bags or 0)
+            tx.profit_loss = _compute_profit_loss(tx.margin_price or tx.price, tx.sell_price, tx.total_bags or 0)
 
     # Mark pending based on whether all weight rows have prices
     # A weight row is considered priced if:
@@ -1164,13 +1222,15 @@ def get_profit_loss(
 
     diff_per_bag = None
     total_diff = None
-    if tx.price is not None and tx.sell_price is not None:
-        diff_per_bag = round(float(tx.sell_price) - float(tx.price), 2)
+    effective_cost = tx.margin_price or tx.price
+    if effective_cost is not None and tx.sell_price is not None:
+        diff_per_bag = round(float(tx.sell_price) - float(effective_cost), 2)
         total_diff = round(diff_per_bag * (tx.total_bags or 0), 2)
 
     return ProfitLossOut(
         transaction_id=tx.id,
         buy_price=tx.price,
+        margin_price=tx.margin_price,
         sell_price=tx.sell_price,
         diff_per_bag=diff_per_bag,
         total_bags=tx.total_bags or 0,

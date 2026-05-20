@@ -256,8 +256,11 @@ class Transaction(Base):
     # ----- Admin-only fields (OUTBOUND) -----
     location = Column(String(200), nullable=True)          # was sub_destination
     sell_price = Column(Float, nullable=True)
+    # Admin-controlled margin price: buying_price → margin_price → selling_price
+    # profit = selling_price - margin_price (falls back to buying_price if None)
+    margin_price = Column(Float, nullable=True)
     # Server-computed for green/red/black UI badge:
-    #   sell_price - price  (positive=green, negative=red, zero=black)
+    #   sell_price - margin_price (positive=green, negative=red, zero=black)
     profit_loss = Column(Float, nullable=True)
 
     # ----- Approval workflow -----
@@ -328,6 +331,8 @@ class TransactionItem(Base):
     # For OUTBOUND: selling price per bag for this specific item
     buying_price = Column(Float, nullable=True)
     selling_price = Column(Float, nullable=True)
+    # Admin-controlled margin price for this item (overrides transaction-level margin_price)
+    margin_price = Column(Float, nullable=True)
 
     notes = Column(Text, nullable=True)
 

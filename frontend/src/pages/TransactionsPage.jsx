@@ -108,6 +108,15 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
     return out;
   });
 
+  // Per-item margin prices for send: key = item_id
+  const [itemMarginPrices, setItemMarginPrices] = useState(() => {
+    const out = {};
+    (initialTx.items || []).forEach(it => {
+      if (it.margin_price != null) out[it.id] = String(it.margin_price);
+    });
+    return out;
+  });
+
   const [loading, setLoading] = useState(false);
 
   // Build weight rows for display — flatten items × weights
@@ -206,6 +215,17 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
     } else {
       if (toWhom.trim())   data.commission_partner = toWhom.trim();
       if (location.trim()) data.location = location.trim();
+
+      // Submit margin prices for items that have them
+      const marginPricesPayload = {};
+      Object.entries(itemMarginPrices).forEach(([itemIdStr, val]) => {
+        if (val && parseFloat(val) > 0) {
+          marginPricesPayload[itemIdStr] = parseFloat(val);
+        }
+      });
+      if (Object.keys(marginPricesPayload).length > 0) {
+        data.item_margin_prices = marginPricesPayload;
+      }
 
       // Only submit selling prices for rows that are NOT already filled
       const unfilledKeys = new Set(
@@ -448,6 +468,54 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
             </div>
           )}
 
+          {/* Per-item margin prices — admin sets internal cost for P&L */}
+          {tx.items && tx.items.length > 0 && (
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: "#f59e0b" }}>
+                Margin Price per Item (optional)
+              </p>
+              <div className="space-y-2">
+                {tx.items.map(it => {
+                  const itemKey = String(it.id);
+                  const existingMargin = it.margin_price;
+                  const val = itemMarginPrices[itemKey] ?? (existingMargin != null ? String(existingMargin) : "");
+                  const bp = it.buying_price ?? tx.price;
+                  return (
+                    <div key={it.id} className="rounded-xl p-3 space-y-1"
+                      style={{ backgroundColor: "rgba(245,158,11,0.04)", border: "1.5px solid rgba(245,158,11,0.2)" }}>
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold" style={{ color: "var(--text-primary)" }}>
+                          {it.brand?.name || `Brand #${it.brand_id}`}
+                          {it.rice_type_ref?.name && <span className="font-normal opacity-70"> · {it.rice_type_ref.name}</span>}
+                          <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded font-semibold"
+                            style={{ backgroundColor: "rgba(245,158,11,0.15)", color: "#f59e0b" }}>
+                            {it.total_bags} bags
+                          </span>
+                        </span>
+                        {bp != null && (
+                          <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+                            Buy: ₹{bp}/bag
+                          </span>
+                        )}
+                      </div>
+                      <input type="number" step="0.01" className="input-field"
+                        value={val}
+                        onWheel={e => e.target.blur()}
+                        style={{ borderColor: val ? "rgba(245,158,11,0.5)" : undefined }}
+                        onChange={e => setItemMarginPrices(p => ({ ...p, [itemKey]: e.target.value }))}
+                        placeholder={`₹ margin price/bag${existingMargin ? ` (was ₹${existingMargin})` : ""}`} />
+                      {val && bp != null && (
+                        <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+                          Effective cost: ₹{parseFloat(val).toFixed(2)} (replaces buy ₹{bp} for P&L)
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Per-weight selling prices — filled rows shown in green, unfilled as editable */}
           <div>
             <p className="text-[10px] font-bold uppercase tracking-wider mb-2" style={{ color: "#ef4444" }}>
@@ -462,11 +530,17 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
                 {allWeightRows.map(row => {
                   const val = weightSellingPrices[row.key] ?? "";
                   const buyP = row.existingBuyPrice;
+                  // Use item-level margin_price as cost basis if available
+                  const itemForRow = tx.items?.find(it => it.id === row.itemId);
+                  const marginP = itemForRow?.margin_price
+                    ?? (itemMarginPrices[String(row.itemId)] ? parseFloat(itemMarginPrices[String(row.itemId)]) : null)
+                    ?? tx.margin_price;
+                  const effectiveCostP = marginP ?? buyP;
 
                   if (row.isSellFilled) {
                     // Already priced — read-only green reference row
                     const filledSell = row.existingSellPrice ?? (val ? parseFloat(val) : null);
-                    const diff = filledSell != null && buyP != null ? filledSell - buyP : null;
+                    const diff = filledSell != null && effectiveCostP != null ? filledSell - effectiveCostP : null;
                     const col = diff == null ? "var(--success)" : diff > 0 ? "var(--success)" : diff < 0 ? "var(--danger)" : "var(--text-muted)";
                     const bg  = diff == null ? "var(--success-soft)" : diff > 0 ? "var(--success-soft)" : "var(--danger-soft)";
                     return (
@@ -484,8 +558,8 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
                           </span>
                         </div>
                         <span className="text-xs font-bold shrink-0" style={{ color: col }}>
-                          {buyP != null && diff != null
-                            ? <>₹{buyP} {diff > 0 ? "+" : "−"} ₹{Math.abs(diff).toFixed(0)}</>
+                          {effectiveCostP != null && diff != null
+                            ? <>{marginP != null ? `M:₹${marginP}` : `B:₹${buyP}`} {diff > 0 ? "+" : "−"} ₹{Math.abs(diff).toFixed(0)}</>
                             : <>₹{filledSell ?? "—"}</>
                           }
                         </span>
@@ -494,7 +568,7 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
                   }
 
                   // Not yet priced — editable
-                  const diff = val && buyP != null ? (parseFloat(val) - buyP) : null;
+                  const diff = val && effectiveCostP != null ? (parseFloat(val) - effectiveCostP) : null;
                   const col = diff == null ? "var(--text-muted)" : diff > 0 ? "var(--success)" : diff < 0 ? "var(--danger)" : "var(--text-muted)";
                   const bg  = diff == null ? "transparent" : diff > 0 ? "var(--success-soft)" : diff < 0 ? "var(--danger-soft)" : "transparent";
                   const total = val && row.quantity ? (parseFloat(val) * row.quantity).toFixed(2) : null;
@@ -515,7 +589,11 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
                         </div>
                         {buyP != null && (
                           <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
-                            Buy: ₹{buyP}/{row.unitLabel}
+                            {marginP != null ? (
+                              <><span style={{ color: "#f59e0b" }}>Margin: ₹{marginP}/{row.unitLabel}</span> <span className="opacity-60">(Buy: ₹{buyP})</span></>
+                            ) : (
+                              <>Buy: ₹{buyP}/{row.unitLabel}</>
+                            )}
                           </span>
                         )}
                       </div>
@@ -528,7 +606,7 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
                         {diff != null && (
                           <span className="text-[11px] font-bold px-2 py-1 rounded-lg"
                             style={{ color: col, backgroundColor: bg }}>
-                            ₹{buyP} {diff > 0 ? "+" : "−"} ₹{Math.abs(diff).toFixed(0)}
+                            {marginP != null ? `M:₹${marginP}` : `B:₹${buyP}`} {diff > 0 ? "+" : "−"} ₹{Math.abs(diff).toFixed(0)}
                           </span>
                         )}
                       </div>
@@ -603,24 +681,28 @@ function TransactionAccordion({ tx, isOpen, onToggle, isAdmin,
   const txItems   = tx.items || [];
   // Compute aggregate profit/loss: prefer per-item/per-weight prices, fall back to legacy global fields
   const sellDiff = (() => {
-    const itemsWithBoth = txItems.filter(it => it.buying_price != null && it.selling_price != null);
+    const itemsWithBoth = txItems.filter(it => (it.margin_price != null || it.buying_price != null) && it.selling_price != null);
     if (itemsWithBoth.length > 0) {
       let totalPL = 0, totalBagsForPL = 0;
       itemsWithBoth.forEach(it => {
         const weightsWithBoth = (it.weights || []).filter(w => w.buying_price != null && w.selling_price != null);
         if (weightsWithBoth.length > 0) {
           weightsWithBoth.forEach(w => {
-            totalPL += (Number(w.selling_price) - Number(w.buying_price)) * (w.quantity || 0);
+            const effectiveCost = it.margin_price ?? Number(w.buying_price);
+            totalPL += (Number(w.selling_price) - effectiveCost) * (w.quantity || 0);
             totalBagsForPL += w.quantity || 0;
           });
         } else {
-          totalPL += (Number(it.selling_price) - Number(it.buying_price)) * (it.total_bags || 0);
+          const effectiveCost = it.margin_price ?? Number(it.buying_price);
+          totalPL += (Number(it.selling_price) - effectiveCost) * (it.total_bags || 0);
           totalBagsForPL += it.total_bags || 0;
         }
       });
       return totalBagsForPL > 0 ? totalPL / totalBagsForPL : null;
     }
-    if (tx.sell_price != null && tx.price != null) return tx.sell_price - tx.price;
+    // Fallback: use transaction-level margin_price → price
+    const effectiveCost = tx.margin_price ?? tx.price;
+    if (tx.sell_price != null && effectiveCost != null) return tx.sell_price - effectiveCost;
     return null;
   })();
 
@@ -850,8 +932,11 @@ function TransactionAccordion({ tx, isOpen, onToggle, isAdmin,
                       </div>
                       {txItems.map((it, i2) => {
                         const sp = it.selling_price;
+                        const mp = it.margin_price ?? tx.margin_price;
                         const bp = it.buying_price ?? tx.price;
-                        const diff = sp != null && bp != null ? sp - bp : null;
+                        // Use margin_price as cost basis if available, else buying_price
+                        const effectiveCost = mp ?? bp;
+                        const diff = sp != null && effectiveCost != null ? sp - effectiveCost : null;
                         const col = diff == null ? "var(--text-muted)" : diff > 0 ? "#10b981" : diff < 0 ? "#ef4444" : "var(--text-muted)";
                         const bg  = diff == null ? "var(--bg-secondary)" : diff > 0 ? "var(--success-soft)" : diff < 0 ? "var(--danger-soft)" : "var(--bg-secondary)";
                         return sp != null ? (
@@ -871,8 +956,9 @@ function TransactionAccordion({ tx, isOpen, onToggle, isAdmin,
                                 )}
                               </div>
                             </div>
-                            <div className="flex items-center gap-3 mt-1">
+                            <div className="flex items-center gap-3 mt-1 flex-wrap">
                               {bp != null && <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>Buy: ₹{bp.toFixed(2)}</span>}
+                              {mp != null && <span className="text-[10px] font-semibold" style={{ color: "#f59e0b" }}>Margin: ₹{mp.toFixed(2)}</span>}
                               <span className="text-[10px] font-semibold" style={{ color: "var(--text-muted)" }}>Total: ₹{(sp * it.total_bags).toFixed(2)}</span>
                               {diff != null && <span className="text-[10px] font-semibold" style={{ color: col }}>P&L: ₹{(diff * it.total_bags).toFixed(2)}</span>}
                             </div>
@@ -884,6 +970,10 @@ function TransactionAccordion({ tx, isOpen, onToggle, isAdmin,
                   {/* Global sell_price fallback */}
                   {tx.sell_price != null && txItems.every(it => it.selling_price == null) && (
                     <InfoRow icon={<DollarSign />} label="Sell Price/Bag" value={`₹${tx.sell_price}`} />
+                  )}
+                  {tx.margin_price != null && txItems.every(it => it.margin_price == null) && (
+                    <InfoRow icon={<DollarSign />} label="Margin Price/Bag" value={`₹${tx.margin_price}`}
+                      valueColor="#f59e0b" />
                   )}
                   {sellDiff != null && (
                     <InfoRow icon={<DollarSign />}
