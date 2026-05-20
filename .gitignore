@@ -16,6 +16,8 @@ build/
 .env.test.local
 .env.production.local
 npm-debug.log*
+Backend.zip
+Frontend.zip
 
 # Android
 android/
