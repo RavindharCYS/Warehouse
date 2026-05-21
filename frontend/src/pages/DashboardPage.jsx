@@ -131,6 +131,7 @@ function ProfitLossBadge({ buyPrice, sellPrice, marginPrice, items, totalBags, s
   );
 }
 
+
 /* ──────────────────────────────────────────────────────────
    REALTIME SELL PRICE INDICATOR
    ────────────────────────────────────────────────────────── */
