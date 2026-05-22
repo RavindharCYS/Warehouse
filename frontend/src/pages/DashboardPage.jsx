@@ -387,8 +387,11 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onMaste
     if (!header.vehicle_number) return toast.error("Vehicle number is required");
     if (!header.driver_name) return toast.error("Driver name is required");
     if (!header.driver_number) return toast.error("Driver number is required");
+    // FIX F6: Hard-blocking on exactly 10 digits prevents submitting transactions
+    // with international numbers or legacy data already stored with fewer/more digits.
+    // Changed to a warning toast that does not block submission.
     if (header.driver_number.length !== 10)
-      return toast.error("Driver number must be exactly 10 digits");
+      toast.error("Driver number should be 10 digits — saved anyway");
 
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
@@ -450,9 +453,22 @@ function ArrivalForm({ onSubmit, onClose, brands, riceTypes, warehouses, onMaste
             if (isAdmin && en.margin_price != null) weightMarginAgg.set(en.weight, en.margin_price);
           }
 
-          // Derive item-level buying_price: use only if single uniform price across all rows
-          const allRowPrices = flatEntries(it).map((r) => r.buying_price).filter((p) => p != null && p > 0);
-          const itemBuyingPrice = allRowPrices.length === 1 ? allRowPrices[0] : null;
+          // Derive item-level buying_price: weighted average across all priced rows.
+          // FIX F2: Previously used allRowPrices[0] only when exactly 1 row had a price.
+          // With 2+ weight rows each carrying a buying_price, itemBuyingPrice was set
+          // to null and dropped from the payload entirely, losing the item-level price
+          // the backend uses as a fallback. Now compute a weighted average so the
+          // item-level price is always populated whenever any per-row prices exist.
+          const allRowPrices = flatEntries(it)
+            .filter((r) => r.buying_price != null && r.buying_price > 0);
+          let itemBuyingPrice = null;
+          if (allRowPrices.length === 1) {
+            itemBuyingPrice = allRowPrices[0].buying_price;
+          } else if (allRowPrices.length > 1) {
+            const totalVal = allRowPrices.reduce((s, r) => s + r.buying_price * (r.quantity || 1), 0);
+            const totalQty = allRowPrices.reduce((s, r) => s + (r.quantity || 1), 0);
+            itemBuyingPrice = totalQty > 0 ? totalVal / totalQty : allRowPrices[0].buying_price;
+          }
 
           // Derive item-level margin_price: use only if single uniform margin across all rows
           const allRowMargins = flatEntries(it).map((r) => r.margin_price).filter((p) => p != null && p > 0);
@@ -1348,7 +1364,10 @@ function SendForm({ onSubmit, onClose, brands, warehouses, stocks }) {
     e.preventDefault();
     if (!header.vehicle_number || !header.driver_name || !header.driver_number)
       return toast.error("Vehicle, driver name & number required");
-    if (header.driver_number.length !== 10) return toast.error("Driver number must be 10 digits");
+    // FIX F6: Warn instead of block — allows legacy/international driver numbers
+    // that don't conform to exactly 10 digits to still be submitted.
+    if (header.driver_number.length !== 10)
+      toast.error("Driver number should be 10 digits — saved anyway");
 
     const payloadItems = [];
     for (let gi = 0; gi < groups.length; gi++) {
@@ -1823,8 +1842,14 @@ export default function DashboardPage() {
     refreshMasters();
   };
   const handleSend = async (payload) => {
+    // FIX F7: Previously this function caught errors silently (no try/catch, but
+    // callers that did try/catch around it would never see a re-thrown error).
+    // More critically, the success toast AND loadDashboard ran before the caller's
+    // catch could fire. Now: let errors propagate naturally so SendForm.handleSubmit
+    // shows the error toast instead of the success toast.
+    // The success toast is shown by SendForm.handleSubmit (inside the try block,
+    // after await onSubmit resolves), so we omit it here to avoid double-toasting.
     await transactionApi.createSend(payload);
-    toast.success(isAdmin ? "Send recorded" : "Send recorded — sent to admin for review");
     loadDashboard();
     refreshMasters();
   };

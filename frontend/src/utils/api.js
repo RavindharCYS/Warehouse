@@ -519,8 +519,14 @@ export const reportsApi = {
     }
     return api.get("/transactions", { params: mapped });
   },
-  exportCsv: null,
-  exportXlsx: null,
+  // FIX F4: exportCsv and exportXlsx were null, causing a runtime TypeError when
+  // the XLSX button was clicked (reportsApi.exportXlsx is not a function).
+  // Both exports are performed entirely client-side inside ReportsPage.handleExport
+  // using the local exportTransactionsCsv helper (CSV) and an inline XML builder
+  // (XLSX). There is no backend endpoint for either format.
+  // These stubs make accidental calls fail loudly instead of silently.
+  exportCsv: () => { throw new Error("Use exportTransactionsCsv() directly — no backend CSV endpoint exists"); },
+  exportXlsx: () => { throw new Error("XLSX export is handled client-side in ReportsPage.handleExport — no backend XLSX endpoint exists"); },
 };
 
 export function downloadBlob(response, filename) {

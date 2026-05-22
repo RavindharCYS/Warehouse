@@ -90,7 +90,13 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
   }, [tx, fetchingFresh]);
 
   // Send state — only shown if not already filled
-  const toWhomAlreadyFilled = !!(tx.commission_partner && tx.commission_partner.trim());
+  // FIX F5: Previously toWhomAlreadyFilled checked tx.commission_partner — same
+  // field as commissionAlreadyFilled for arrival. For an outbound transaction that
+  // happened to carry a commission_partner (e.g. copied from arrival context), the
+  // "To Whom" input was hidden and the admin could not update it.
+  // Fix: scope the check by transaction type so the send "To Whom" field is
+  // independently controllable regardless of how commission_partner got set.
+  const toWhomAlreadyFilled = !isArrival && !!(tx.commission_partner && tx.commission_partner.trim());
   const locationAlreadyFilled = !!(tx.location && tx.location.trim());
 
   const [toWhom, setToWhom] = useState("");
@@ -159,7 +165,11 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
       });
     });
     return rows;
-  }, [tx, weightBuyingPrices, weightSellingPrices]);
+  // FIX F3: weightBuyingPrices and weightSellingPrices were listed as deps but
+  // are never read inside this memo. Including them caused a re-computation on
+  // every keystroke and could mask stale-state bugs if someone later tried to
+  // use them inside. The memo only reads `tx`, so only `tx` is listed.
+  }, [tx]);
 
   const handleSave = async () => {
     const data = {};
@@ -206,12 +216,20 @@ function PendingAdminModal({ tx: initialTx, onClose, onSave, i18n }) {
         data.hidden_charges === undefined &&
         !data.commission_partner
       );
-      if (nothingNewEntered && stillUnfilledWeights.length === 0) {
-        // Everything already filled — allow save (will mark complete)
-      } else if (nothingNewEntered) {
+
+      // FIX F1: Previous logic had an implicit fall-through when both conditions
+      // were true (nothingNew && noUnfilled). This is correct — we DO want to
+      // allow the save so the backend can re-evaluate pending status.
+      // The bug was that clearing a typed value made nothingNewEntered=true while
+      // unfilled rows still existed, correctly firing the error — but the comment
+      // "everything already filled — allow save" was misleading.
+      // Restructured for clarity: block only when nothing new AND there IS work left.
+      if (nothingNewEntered && stillUnfilledWeights.length > 0) {
         toast.error("Fill in at least one required field to save");
         return;
       }
+      // If nothingNewEntered && stillUnfilledWeights.length === 0 → all already
+      // saved server-side, fall through so backend can mark complete.
     } else {
       if (toWhom.trim())   data.commission_partner = toWhom.trim();
       if (location.trim()) data.location = location.trim();

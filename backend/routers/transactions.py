@@ -397,6 +397,66 @@ def list_transactions(
 
 
 # ============================================================
+# LEDGER
+# ============================================================
+# FIX B1/B4: /ledger must be declared BEFORE /{transaction_id} so FastAPI
+# does not match the literal string "ledger" as a transaction_id integer.
+@router.get("/ledger", response_model=StockLedger)
+def get_stock_ledger(
+    stock_id: int,
+    warehouse_id: int,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    stock = db.query(Stock).filter(Stock.id == stock_id).first()
+    if not stock:
+        raise HTTPException(status_code=404, detail="Stock not found")
+    warehouse = db.query(Warehouse).filter(Warehouse.id == warehouse_id).first()
+    if not warehouse:
+        raise HTTPException(status_code=404, detail="Warehouse not found")
+
+    q = (
+        db.query(Transaction)
+        .options(
+            joinedload(Transaction.items),
+            joinedload(Transaction.created_by_user),
+        )
+        .join(Transaction.items)
+        .filter(
+            TransactionItem.brand_id == stock.brand_id,
+            or_(
+                TransactionItem.warehouse_id == warehouse_id,
+                TransactionItem.splits.any(TransactionItemSplit.warehouse_id == warehouse_id),
+            ),
+            TransactionItem.bag_size_kg == stock.bag_weight_kg,
+        )
+    )
+    if date_from:
+        q = q.filter(Transaction.transaction_date >= datetime.combine(date_from, datetime.min.time()))
+    if date_to:
+        q = q.filter(Transaction.transaction_date <= datetime.combine(date_to, datetime.max.time()))
+
+    transactions = q.order_by(Transaction.transaction_date.asc()).distinct().all()
+
+    total_in = sum(t.total_bags or 0 for t in transactions if t.transaction_type == TransactionType.inbound)
+    total_out = sum(t.total_bags or 0 for t in transactions if t.transaction_type == TransactionType.outbound)
+    closing = total_in - total_out
+
+    return StockLedger(
+        stock=StockOut.model_validate(stock),
+        warehouse=WarehouseOut.model_validate(warehouse),
+        transactions=transactions,
+        opening_stock=0,
+        total_inbound=total_in,
+        total_outbound=total_out,
+        closing_stock=closing,
+        closing_stock_kg=closing * (stock.bag_weight_kg or 25),
+    )
+
+
+# ============================================================
 # GET SINGLE TRANSACTION
 # ============================================================
 @router.get("/{transaction_id}", response_model=TransactionOut)
@@ -1072,6 +1132,11 @@ def complete_admin_fields(
 
     else:  # outbound
         if "location" in payload:        tx.location = payload["location"]
+        # FIX B3: commission_partner ("To Whom") was never written for outbound
+        # transactions. The frontend sends data.commission_partner but the backend
+        # ignored it, so the field disappeared after every save.
+        if "commission_partner" in payload and payload["commission_partner"]:
+            tx.commission_partner = payload["commission_partner"]
 
         # Per-item margin prices: { item_id: price }
         if "item_margin_prices" in payload and isinstance(payload["item_margin_prices"], dict):
@@ -1115,7 +1180,11 @@ def complete_admin_fields(
                             TransactionItemWeight.weight_kg == wkg,
                         ).first()
                         if tiw and sp is not None:
-                            tiw.selling_price = float(sp) if hasattr(tiw, "selling_price") else None
+                            # FIX B2: hasattr on a SQLAlchemy column always returns True, so
+                            # the conditional was harmless but misleading. More importantly,
+                            # the `else None` branch silently discarded valid prices if the
+                            # guard ever evaluated False. Assign directly.
+                            tiw.selling_price = float(sp)
                 except (ValueError, TypeError):
                     pass
 
@@ -1189,10 +1258,26 @@ def complete_admin_fields(
         tx.admin_pending = not (all_priced and all_admin_fields_filled)
         tx.approval_status = ApprovalStatus.pending if tx.admin_pending else ApprovalStatus.completed
     else:
+        # FIX B5: Previously only checked it.selling_price (item-level), but per-weight
+        # selling prices are stored on TransactionItemWeight.selling_price. A transaction
+        # where only weight-level prices were filled would stay permanently pending.
+        # Now: a TransactionItem is considered sell-priced if it has an item-level price
+        # OR all of its weight rows have a selling_price set.
         all_items_check = db.query(TransactionItem).filter(
             TransactionItem.transaction_id == tx.id
         ).all()
-        all_sell_priced = all(it.selling_price is not None for it in all_items_check) if all_items_check else False
+
+        def _item_is_sell_priced(it: TransactionItem) -> bool:
+            if it.selling_price is not None:
+                return True
+            weights = db.query(TransactionItemWeight).filter(
+                TransactionItemWeight.item_id == it.id
+            ).all()
+            if weights:
+                return all(w.selling_price is not None for w in weights)
+            return False
+
+        all_sell_priced = all(_item_is_sell_priced(it) for it in all_items_check) if all_items_check else False
         tx.admin_pending = not all_sell_priced
         tx.approval_status = ApprovalStatus.pending if tx.admin_pending else ApprovalStatus.completed
 
@@ -1236,64 +1321,6 @@ def get_profit_loss(
         total_bags=tx.total_bags or 0,
         total_profit_loss=total_diff,
         status=("profit" if (total_diff or 0) > 0 else "loss" if (total_diff or 0) < 0 else "break_even"),
-    )
-
-
-# ============================================================
-# LEDGER (legacy)
-# ============================================================
-@router.get("/ledger", response_model=StockLedger)
-def get_stock_ledger(
-    stock_id: int,
-    warehouse_id: int,
-    date_from: Optional[date] = None,
-    date_to: Optional[date] = None,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    stock = db.query(Stock).filter(Stock.id == stock_id).first()
-    if not stock:
-        raise HTTPException(status_code=404, detail="Stock not found")
-    warehouse = db.query(Warehouse).filter(Warehouse.id == warehouse_id).first()
-    if not warehouse:
-        raise HTTPException(status_code=404, detail="Warehouse not found")
-
-    q = (
-        db.query(Transaction)
-        .options(
-            joinedload(Transaction.items),
-            joinedload(Transaction.created_by_user),
-        )
-        .join(Transaction.items)
-        .filter(
-            TransactionItem.brand_id == stock.brand_id,
-            or_(
-                TransactionItem.warehouse_id == warehouse_id,
-                TransactionItem.splits.any(TransactionItemSplit.warehouse_id == warehouse_id),
-            ),
-            TransactionItem.bag_size_kg == stock.bag_weight_kg,
-        )
-    )
-    if date_from:
-        q = q.filter(Transaction.transaction_date >= datetime.combine(date_from, datetime.min.time()))
-    if date_to:
-        q = q.filter(Transaction.transaction_date <= datetime.combine(date_to, datetime.max.time()))
-
-    transactions = q.order_by(Transaction.transaction_date.asc()).distinct().all()
-
-    total_in = sum(t.total_bags or 0 for t in transactions if t.transaction_type == TransactionType.inbound)
-    total_out = sum(t.total_bags or 0 for t in transactions if t.transaction_type == TransactionType.outbound)
-    closing = total_in - total_out
-
-    return StockLedger(
-        stock=StockOut.model_validate(stock),
-        warehouse=WarehouseOut.model_validate(warehouse),
-        transactions=transactions,
-        opening_stock=0,
-        total_inbound=total_in,
-        total_outbound=total_out,
-        closing_stock=closing,
-        closing_stock_kg=closing * (stock.bag_weight_kg or 25),
     )
 
 
